@@ -1,0 +1,31 @@
+[options]
+; This is the password that allows database operations:
+admin_passwd = admin
+db_host = localhost
+db_port = 5432
+db_user = odoo
+db_password = odoo
+; Odoo 19+: use empty or omit (do not use False; db_name is a list). Example: db_name = mydb
+db_name =
+; Listen interface (Odoo 19+ warns if missing; will default to 127.0.0.1 in 20.0)
+http_interface = 0.0.0.0
+; Uncomment the line below if you want to set a specific port
+; http_port = 8069
+
+; Addons paths (custom_addons, external_addons created empty; Odoo skips invalid dirs)
+addons_path = custom_addons,external_addons,src/odoo/addons
+
+; Logging (Odoo 19+: use empty or omit, not False)
+logfile =
+log_level = info
+
+; Workers (for production)
+; workers = 4
+
+; Default language and country for new databases (used when creating DB from CLI)
+; lang = es_ES
+; country_code = BO
+
+; Other options
+; without_demo = True
+; test_enable = False

@@ -1,0 +1,56 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify tag matches Cargo.toml version
+        run: |
+          TAG_VER="${GITHUB_REF_NAME#v}"
+          PKG_VER="$(grep -E '^version[[:space:]]*=[[:space:]]*"' Cargo.toml | head -n1 | sed -E 's/^version[[:space:]]*=[[:space:]]*"([^"]+)".*$/\1/')"
+          if [ "$TAG_VER" != "$PKG_VER" ]; then
+            echo "Tag version '$TAG_VER' does not match Cargo.toml package version '$PKG_VER'." >&2
+            exit 1
+          fi
+          echo "Release version $PKG_VER matches tag."
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup
+        run: |
+          mkdir -p dist
+
+      - name: Build linux binary
+        run: cargo build --release
+
+      - name: Package linux tarball
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          tar -czf "dist/odx-v${VERSION}-linux-x86_64.tar.gz" -C target/release odx
+
+      - name: Build Debian package
+        run: packaging/debian/build-deb.sh
+
+      - name: Build Arch package
+        run: packaging/arch/build-archpkg.sh
+
+      - name: Build Windows installer
+        run: packaging/windows/build-installer.sh
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*

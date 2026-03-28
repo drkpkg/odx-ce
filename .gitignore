@@ -1,0 +1,42 @@
+# Rust
+/target/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+ENV/
+env/
+
+# Odoo
+*.log
+.odoo/
+*.db
+
+# Testing
+.testing/
+*.test-*
+test_project_*
+odoo-*.zip
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project specific
+odoo.conf.local
+
+# Packaging outputs
+dist/
+.work/

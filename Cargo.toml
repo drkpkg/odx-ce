@@ -1,0 +1,45 @@
+[package]
+name = "odoo-cli"
+version = "1.0.0"
+edition = "2021"
+description = "odx CE: Odoo development CLI (Community Edition, vanilla Odoo core)"
+license = "MIT"
+repository = "https://github.com/Appex/odoo-framework"
+
+[package.metadata.deb]
+name = "odx"
+maintainer = "Appex"
+copyright = "2026, Appex"
+license-file = ["LICENSE", "4"]
+extended-description = """\
+odx Community Edition is a Rust CLI to scaffold and operate Odoo development projects (17/18/19) using vanilla Odoo without core patches.\
+"""
+depends = "python3, python3-venv, ca-certificates"
+section = "utils"
+priority = "optional"
+assets = [
+  ["target/release/odx", "usr/bin/odx", "755"],
+  ["README.md", "usr/share/doc/odx/README.md", "644"],
+]
+
+[[bin]]
+name = "odx"
+path = "src/main.rs"
+
+[[test]]
+name = "integration_tests"
+path = "tests/integration_tests.rs"
+
+[dependencies]
+clap = { version = "4.4", features = ["derive"] }
+configparser = "3.0"
+dirs = "5.0"
+which = "4.4"
+git2 = "0.18"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.8"
+regex = "1.10"
+
+[target.'cfg(windows)'.dependencies]
+winapi = { version = "0.3", features = ["consoleapi"] }

@@ -1,0 +1,38 @@
+# {{{project_name}}}
+
+Odoo {{{version}}} project
+
+## Setup
+
+1. Install Python dependencies:
+   ```bash
+   odx install
+   ```
+
+2. Start PostgreSQL:
+   ```bash
+   odx db start
+   ```
+
+3. Run Odoo:
+   ```bash
+   odx run
+   ```
+
+## Project Structure
+
+- `custom_addons/` - Custom Odoo modules
+- `external_addons/` - External Odoo modules (OCA, etc.)
+- `src/odoo/` - Odoo core (git submodule)
+- `docs/` - Project documentation
+- `scripts/` - Project-specific helper scripts (not used by odx CLI)
+
+## Version Control
+
+If you want to use Git:
+
+```bash
+git init
+git add .
+git commit -m "Initial commit"
+```

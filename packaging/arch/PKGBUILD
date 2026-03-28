@@ -1,0 +1,23 @@
+pkgname=odx
+pkgver=1.0.0
+pkgrel=1
+pkgdesc="odx CE: Odoo development CLI (Community Edition)"
+arch=('x86_64')
+url="https://github.com/Appex/odoo-framework"
+license=('MIT')
+depends=('python' 'ca-certificates')
+makedepends=('rust')
+source=("odx-${pkgver}.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+  cd "odx-${pkgver}"
+  cargo build --release
+}
+
+package() {
+  cd "odx-${pkgver}"
+  install -Dm755 "target/release/odx" "${pkgdir}/usr/bin/odx"
+  install -Dm644 "README.md" "${pkgdir}/usr/share/doc/odx/README.md"
+  install -Dm644 "LICENSE" "${pkgdir}/usr/share/licenses/odx/LICENSE"
+}

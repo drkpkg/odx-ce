@@ -1,0 +1,44 @@
+# System Dependencies Mapping
+# Maps Python packages to system-level dependencies required per OS
+
+[psycopg2-binary]
+linux = ["libpq-dev"]
+windows = []
+macos = ["postgresql"]
+
+[psycopg2]
+linux = ["libpq-dev", "python3-dev"]
+windows = []
+macos = ["postgresql", "python3-dev"]
+
+[lxml]
+linux = ["libxml2-dev", "libxslt1-dev", "python3-dev"]
+windows = []
+macos = ["libxml2", "libxslt", "python3-dev"]
+
+[Pillow]
+linux = ["libjpeg-dev", "zlib1g-dev", "libfreetype6-dev", "liblcms2-dev", "libwebp-dev", "python3-dev"]
+windows = []
+macos = ["jpeg", "zlib", "freetype", "lcms2", "libwebp", "python3-dev"]
+
+[python-ldap]
+linux = ["libldap2-dev", "libsasl2-dev", "python3-dev"]
+windows = []
+macos = ["openldap", "python3-dev"]
+
+[cryptography]
+linux = ["libssl-dev", "libffi-dev", "python3-dev"]
+windows = []
+macos = ["openssl", "libffi", "python3-dev"]
+
+# Common system dependencies for Linux
+[linux.common]
+packages = ["build-essential", "python3-dev", "python3-pip"]
+
+# Common system dependencies for macOS
+[macos.common]
+packages = ["python3-dev"]
+
+# Common system dependencies for Windows
+[windows.common]
+packages = []

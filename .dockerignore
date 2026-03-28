@@ -1,0 +1,11 @@
+.git
+.testing
+target
+dist
+**/*.zip
+**/*.log
+.venv
+venv
+env
+ENV
+**/__pycache__

@@ -1,0 +1,21 @@
+# AGENTS.md
+
+This file contains documentation for AI agents working on this Odoo project.
+
+## Project Information
+
+- **Project Name**: {{{project_name}}}
+- **Odoo Version**: {{{version}}}
+- **Python Version**: 3.10+
+
+## Custom Modules
+
+Custom modules are located in `custom_addons/`.
+
+## External Modules
+
+External modules (OCA, etc.) are located in `external_addons/`.
+
+## Development Guidelines
+
+Follow Odoo 17+ development guidelines when working on this project.

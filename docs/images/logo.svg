@@ -1,0 +1,53 @@
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="512" height="512"
+     viewBox="0 0 512 512"
+     role="img"
+     aria-label="odx terminal logo">
+
+  <defs>
+    <!-- Odoo-inspired terminal background -->
+    <linearGradient id="g" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#875A7B"/>
+      <stop offset="100%" stop-color="#6F4B65"/>
+    </linearGradient>
+
+    <filter id="s" x="-15%" y="-15%" width="130%" height="130%">
+      <feDropShadow dx="0" dy="10" stdDeviation="14"
+                    flood-color="#000000"
+                    flood-opacity="0.22"/>
+    </filter>
+  </defs>
+
+  <!-- Terminal body -->
+  <rect x="56" y="56"
+        width="400" height="400"
+        rx="24"
+        fill="url(#g)"
+        filter="url(#s)"/>
+
+  <!-- Terminal top bar -->
+  <rect x="56" y="56"
+        width="400" height="56"
+        rx="24"
+        fill="#1F1B24"/>
+
+  <!-- Top bar dots -->
+  <circle cx="96" cy="84" r="6" fill="#F87171"/>
+  <circle cx="120" cy="84" r="6" fill="#FBBF24"/>
+  <circle cx="144" cy="84" r="6" fill="#34D399"/>
+
+  <!-- CLI text -->
+  <text x="120" y="280"
+        font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, monospace"
+        font-size="72"
+        font-weight="600"
+        fill="#FFFFFF">
+    &gt; odx
+  </text>
+
+  <!-- Cursor -->
+  <rect x="340" y="240"
+        width="5" height="45"
+        fill="#FFFFFF"
+        opacity="0.7"/>
+</svg>
