@@ -15,7 +15,6 @@ pub fn execute() -> Result<(), String> {
 
     let mut all_ok = true;
 
-    // Check common dependencies
     println!("Common Dependencies:");
     println!("--------------------");
 
@@ -25,7 +24,6 @@ pub fn execute() -> Result<(), String> {
 
     println!();
 
-    // Check OS-specific dependencies
     println!("System Dependencies ({})", format_os_name(os));
     println!("{}", "-".repeat(30));
     match os {
@@ -33,32 +31,29 @@ pub fn execute() -> Result<(), String> {
         "windows" => all_ok &= check_windows_dependencies()?,
         "macos" => all_ok &= check_macos_dependencies()?,
         _ => {
-            println!("⚠  OS-specific checks not available for this platform");
+            println!("  OS-specific checks not available for this platform");
         }
     }
 
     println!();
 
-    // Check Python dependencies from project
     if let Ok(project_root) = find_project_root() {
         println!("Project Python Dependencies:");
         println!("---------------------------");
         check_python_dependencies(&project_root)?;
         println!();
 
-        // Odoo version in project (Community Edition: vanilla Odoo, no core patch)
         println!("Odoo in project:");
         println!("----------------");
         check_odoo_in_project(&project_root)?;
         println!();
     }
 
-    // Final status
     println!("{}", "=".repeat(50));
     if all_ok {
         println!("✓ All requirements met");
     } else {
-        println!("⚠  Some requirements are missing. Please install them before proceeding.");
+        println!("  Some requirements are missing. Please install them before proceeding.");
     }
 
     Ok(())
@@ -71,7 +66,7 @@ fn check_python() -> Result<bool, String> {
             Ok(true)
         }
         Err(e) => {
-            println!("✗ {}", e);
+            println!("  {}", e);
             Ok(false)
         }
     }
@@ -95,7 +90,7 @@ fn check_git() -> Result<bool, String> {
             Ok(true)
         }
         Err(e) => {
-            println!("✗ {}", e);
+            println!("  {}", e);
             Ok(false)
         }
     }
@@ -119,11 +114,10 @@ fn check_docker() -> Result<bool, String> {
             docker_ok = true;
         }
         Err(_) => {
-            println!("⚠  Docker not found (optional, for database operations)");
+            println!("  Docker not found (optional, for database operations)");
         }
     }
 
-    // Check Docker Compose
     if which::which("compose").is_ok() || which::which("docker-compose").is_ok() {
         let compose_cmd = if which::which("compose").is_ok() {
             "docker compose"
@@ -149,7 +143,7 @@ fn check_docker() -> Result<bool, String> {
         }
         compose_ok = true;
     } else {
-        println!("⚠  Docker Compose not found (optional, for database operations)");
+        println!("  Docker Compose not found (optional, for database operations)");
     }
 
     Ok(docker_ok && compose_ok)
@@ -175,7 +169,7 @@ fn check_linux_dependencies() -> Result<bool, String> {
         if check_system_package(package) {
             println!("  ✓ {}", package);
         } else {
-            println!("  ✗ {} (recommended)", package);
+            println!("  {} (recommended)", package);
             all_ok = false;
         }
     }
@@ -186,7 +180,7 @@ fn check_linux_dependencies() -> Result<bool, String> {
             println!("  ✓ {} - {}", package, description);
         } else {
             println!(
-                "  ⚠  {} - {} (may be needed for some Python packages)",
+                "  {} - {} (may be needed for some Python packages)",
                 package, description
             );
         }
@@ -197,30 +191,28 @@ fn check_linux_dependencies() -> Result<bool, String> {
 
 fn check_windows_dependencies() -> Result<bool, String> {
     println!("Windows-specific checks:");
-    println!("  ℹ  Visual C++ Build Tools may be required for some Python packages");
-    println!("  ℹ  WSL2 is recommended for better compatibility");
-    println!("  ℹ  PostgreSQL client libraries are optional");
+    println!("  Visual C++ Build Tools may be required for some Python packages");
+    println!("  WSL2 is recommended for better compatibility");
+    println!("  PostgreSQL client libraries are optional");
     Ok(true)
 }
 
 fn check_macos_dependencies() -> Result<bool, String> {
     println!("macOS-specific checks:");
 
-    // Check for Homebrew
     if which::which("brew").is_ok() {
-        println!("  ✓ Homebrew installed");
+        println!("  Homebrew installed");
     } else {
-        println!("  ⚠  Homebrew not found (recommended for package management)");
+        println!("  Homebrew not found (recommended for package management)");
     }
 
-    // Check for Xcode Command Line Tools
     if Path::new("/Library/Developer/CommandLineTools").exists() {
-        println!("  ✓ Xcode Command Line Tools installed");
+        println!("  Xcode Command Line Tools installed");
     } else {
-        println!("  ⚠  Xcode Command Line Tools not found (run: xcode-select --install)");
+        println!("  Xcode Command Line Tools not found (run: xcode-select --install)");
     }
 
-    println!("  ℹ  Common packages: postgresql, python3-dev");
+    println!("  Common packages: postgresql, python3-dev");
 
     Ok(true)
 }
@@ -229,14 +221,13 @@ fn check_python_dependencies(project_root: &Path) -> Result<(), String> {
     let requirements_file = project_root.join("src/odoo/requirements.txt");
 
     if !requirements_file.exists() {
-        println!("⚠  requirements.txt not found (project may not be initialized)");
+        println!("  requirements.txt not found (project may not be initialized)");
         return Ok(());
     }
 
     let requirements_content = fs::read_to_string(&requirements_file)
         .map_err(|e| format!("Failed to read requirements.txt: {}", e))?;
 
-    // Parse requirements.txt (simple parsing)
     let mut packages = Vec::new();
     for line in requirements_content.lines() {
         let line = line.trim();
@@ -244,7 +235,6 @@ fn check_python_dependencies(project_root: &Path) -> Result<(), String> {
             continue;
         }
 
-        // Extract package name (before ==, >=, etc.)
         let package_name = line
             .split_whitespace()
             .next()
@@ -260,7 +250,7 @@ fn check_python_dependencies(project_root: &Path) -> Result<(), String> {
     }
 
     if packages.is_empty() {
-        println!("⚠  No Python packages found in requirements.txt");
+        println!("  No Python packages found in requirements.txt");
         return Ok(());
     }
 
@@ -276,12 +266,12 @@ fn check_python_dependencies(project_root: &Path) -> Result<(), String> {
 fn check_odoo_in_project(project_root: &Path) -> Result<(), String> {
     let odoo_path = project_root.join("src/odoo");
     if !odoo_path.exists() {
-        println!("  ⚠  src/odoo not found (create a project with 'odx new')");
+        println!("  src/odoo not found (create a project with 'odx new')");
         return Ok(());
     }
     match detect_odoo_version(project_root) {
         Ok(version) => println!("  Odoo version: {}", version),
-        Err(e) => println!("  ⚠  {}", e),
+        Err(e) => println!("  {}", e),
     }
     Ok(())
 }

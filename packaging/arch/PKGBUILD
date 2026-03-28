@@ -1,9 +1,9 @@
 pkgname=odx
 pkgver=1.0.0
 pkgrel=1
-pkgdesc="odx CE: Odoo development CLI (Community Edition)"
+pkgdesc="odx: Odoo development CLI"
 arch=('x86_64')
-url="https://github.com/Appex/odoo-framework"
+url="https://github.com/drkpkg/odx-ce"
 license=('MIT')
 depends=('python' 'ca-certificates')
 makedepends=('rust')

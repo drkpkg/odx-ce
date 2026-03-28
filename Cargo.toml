@@ -2,17 +2,17 @@
 name = "odoo-cli"
 version = "1.0.0"
 edition = "2021"
-description = "odx CE: Odoo development CLI (Community Edition, vanilla Odoo core)"
+description = "odx: Odoo development CLI"
 license = "MIT"
-repository = "https://github.com/Appex/odoo-framework"
+repository = "https://github.com/drkpkg/odx-ce"
 
 [package.metadata.deb]
 name = "odx"
-maintainer = "Appex"
-copyright = "2026, Appex"
+maintainer = "drkpkg"
+copyright = "2026"
 license-file = ["LICENSE", "4"]
 extended-description = """\
-odx Community Edition is a Rust CLI to scaffold and operate Odoo development projects (17/18/19) using vanilla Odoo without core patches.\
+odx is a Rust CLI to scaffold and operate Odoo development projects.\
 """
 depends = "python3, python3-venv, ca-certificates"
 section = "utils"
