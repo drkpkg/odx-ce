@@ -110,6 +110,22 @@ fn check_prerequisites(python_version: &str) -> Result<(), String> {
 }
 
 fn clone_odoo_repo(version: &str, project_path: &Path) -> Result<(), String> {
+    let odoo_path = project_path.join("src/odoo");
+    if odoo_path.exists() {
+        // If the directory already exists and is non-empty, assume Odoo is already present
+        // (e.g. created by a previous run) and avoid destructive removal.
+        let is_empty = fs::read_dir(&odoo_path)
+            .map_err(|e| format!("Failed to read existing src/odoo: {}", e))?
+            .next()
+            .is_none();
+        if is_empty {
+            // `git clone` refuses to clone into an existing directory, even if empty.
+            fs::remove_dir(&odoo_path)
+                .map_err(|e| format!("Failed to remove empty src/odoo: {}", e))?;
+        } else {
+            return Ok(());
+        }
+    }
     execute_command(
         "git",
         &[

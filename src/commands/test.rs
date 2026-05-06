@@ -1,6 +1,7 @@
 use crate::utils::{
     ensure_odoo_conf_local, execute_command, find_project_root, find_python_command, ensure_venv,
 };
+use crate::commands::db::drop_db;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub fn execute(tags: &[String]) -> Result<(), String> {
@@ -88,17 +89,9 @@ pub fn execute(tags: &[String]) -> Result<(), String> {
 
     // Step 4: Drop database (always, even if tests failed)
     println!("Step 4: Cleaning up temporary database...");
-    let drop_args = vec![
-        odoo_bin_str.as_str(),
-        "-c",
-        config_file_str.as_str(),
-        "db", "drop",
-        db_name.as_str(),
-    ];
-
-    if let Err(drop_err) = execute_command(&python, &drop_args, Some(&project_root)) {
+    if let Err(drop_err) = drop_db(&db_name, true, true) {
         eprintln!("Warning: Failed to drop temporary database {}: {}", db_name, drop_err);
-        eprintln!("You may need to manually drop it: odoo db drop {}", db_name);
+        eprintln!("You may need to manually drop it: odx db drop --force --if-exists {}", db_name);
     } else {
         println!("Temporary database {} dropped successfully", db_name);
     }

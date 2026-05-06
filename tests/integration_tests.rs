@@ -59,6 +59,15 @@ fn ensure_odoo_zip_downloaded(version: &str) {
 }
 
 fn get_odoo_binary() -> PathBuf {
+    // Preferred: use the binary built by `cargo test`.
+    // Cargo exposes this path for integration tests.
+    if let Ok(p) = std::env::var("CARGO_BIN_EXE_odx") {
+        let path = PathBuf::from(p);
+        if path.exists() {
+            return path;
+        }
+    }
+
     // Get the project root (where Cargo.toml is)
     let project_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     
@@ -321,6 +330,20 @@ fn test_commands_exist() {
             "Should have 'run' command. Output: {}", stdout);
     assert!(stdout.contains("sync") || stdout.contains("Sync"),
             "Should have 'sync' command. Output: {}", stdout);
+
+    // Verify db subcommands include drop
+    let db_help = Command::new(&odoo_bin)
+        .arg("db")
+        .arg("--help")
+        .output()
+        .expect("Failed to execute 'odx db --help'");
+    assert!(db_help.status.success(), "'odx db --help' should succeed");
+    let db_stdout = String::from_utf8_lossy(&db_help.stdout);
+    assert!(
+        db_stdout.contains("drop") || db_stdout.contains("Drop"),
+        "Should have 'db drop' subcommand. Output: {}",
+        db_stdout
+    );
 }
 
 #[test]
