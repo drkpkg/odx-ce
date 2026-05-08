@@ -21,7 +21,10 @@ jobs:
       - name: Verify tag matches Cargo.toml version
         run: |
           TAG_VER="${GITHUB_REF_NAME#v}"
-          PKG_VER="$(grep -E '^version[[:space:]]*=[[:space:]]*"' Cargo.toml | head -n1 | sed -E 's/^version[[:space:]]*=[[:space:]]*"([^"]+)".*$/\1/')"
+          echo "Git ref: $GITHUB_REF"
+          echo "Git sha: $(git rev-parse HEAD)"
+          echo "Cargo.toml version line: $(grep -E '^version[[:space:]]*=' Cargo.toml | head -n1)"
+          PKG_VER="$(cargo metadata --no-deps --format-version 1 | python -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')"
           if [ "$TAG_VER" != "$PKG_VER" ]; then
             echo "Tag version '$TAG_VER' does not match Cargo.toml package version '$PKG_VER'." >&2
             exit 1
