@@ -2,17 +2,23 @@ use crate::utils::{
     check_command_exists, check_python_version, check_system_package, detect_odoo_version,
     detect_os, find_project_root, get_command_version,
 };
+use crate::install_guide::{build_install_guide, Requirement};
+use crate::os_context::{LinuxFamily, OsContext, PackageManager, Platform};
 use crate::ui::Ui;
 use std::fs;
 use std::path::Path;
 
 pub fn execute(ui: &Ui) -> Result<(), String> {
     let os = detect_os();
+    let ctx = OsContext::detect();
 
     ui.heading("Odoo Framework - System Requirements Check");
     ui.info("===========================================");
     ui.info("");
-    ui.info(format!("Operating System: {}", format_os_name(os)));
+    ui.info(format!(
+        "Operating System: {}",
+        ctx.pretty_name.as_deref().unwrap_or(format_os_name(os))
+    ));
     ui.info("");
 
     let mut all_ok = true;
@@ -29,8 +35,8 @@ pub fn execute(ui: &Ui) -> Result<(), String> {
     ui.heading(format!("System Dependencies ({})", format_os_name(os)));
     ui.info("-".repeat(30));
     match os {
-        "linux" => all_ok &= check_linux_dependencies(ui)?,
-        "windows" => all_ok &= check_windows_dependencies(ui)?,
+        "linux" => all_ok &= check_linux_dependencies(ui, &ctx)?,
+        "windows" => all_ok &= check_windows_dependencies(ui, &ctx)?,
         "macos" => all_ok &= check_macos_dependencies(ui)?,
         _ => {
             ui.warn("OS-specific checks not available for this platform");
@@ -55,8 +61,11 @@ pub fn execute(ui: &Ui) -> Result<(), String> {
     if all_ok {
         ui.success("All requirements met");
     } else {
-        ui.warn("Some requirements are missing. Please install them before proceeding.");
+        ui.info("WARNING: Some requirements are missing. Please install them before proceeding.");
     }
+
+    ui.info("");
+    print_install_guide(ui, &ctx);
 
     Ok(())
 }
@@ -159,52 +168,35 @@ fn check_docker(ui: &Ui) -> Result<bool, String> {
     Ok(docker_ok && compose_ok)
 }
 
-fn check_linux_dependencies(ui: &Ui) -> Result<bool, String> {
+fn check_linux_dependencies(ui: &Ui, ctx: &OsContext) -> Result<bool, String> {
     let mut all_ok = true;
 
-    let common_packages = vec!["build-essential", "python3-dev", "python3-pip"];
-
-    let optional_packages = vec![
-        ("libpq-dev", "PostgreSQL development libraries"),
-        ("libxml2-dev", "XML libraries (for lxml)"),
-        ("libxslt1-dev", "XSLT libraries (for lxml)"),
-        ("libjpeg-dev", "JPEG libraries (for Pillow)"),
-        ("zlib1g-dev", "Zlib libraries (for Pillow)"),
-        ("libssl-dev", "SSL libraries (for cryptography)"),
-        ("libffi-dev", "FFI libraries (for cryptography)"),
-    ];
+    let family = ctx.linux_family.unwrap_or(LinuxFamily::Unknown);
+    let pm = ctx.package_manager;
 
     ui.info("Checking common packages...");
-    for package in common_packages {
-        if check_system_package(package) {
-            ui.check(true, package, None);
+    for (pkg, ok) in check_odoo_full_packages(pm, family) {
+        if ok {
+            ui.check(true, &pkg, None);
         } else {
-            ui.check(false, package, Some("(recommended)"));
+            ui.check(false, &pkg, Some("(recommended)"));
             all_ok = false;
-        }
-    }
-
-    ui.info("");
-    ui.info("Checking optional packages...");
-    for (package, description) in optional_packages {
-        if check_system_package(package) {
-            ui.check(true, package, Some(&format!("- {}", description)));
-        } else {
-            ui.warn(format!(
-                "{} - {} (may be needed for some Python packages)",
-                package, description
-            ));
         }
     }
 
     Ok(all_ok)
 }
 
-fn check_windows_dependencies(ui: &Ui) -> Result<bool, String> {
+fn check_windows_dependencies(ui: &Ui, ctx: &OsContext) -> Result<bool, String> {
     ui.heading("Windows-specific checks:");
     ui.info("Visual C++ Build Tools may be required for some Python packages");
     ui.info("WSL2 is recommended for better compatibility");
     ui.info("PostgreSQL client libraries are optional");
+    if ctx.package_manager == PackageManager::Winget {
+        ui.check(true, "winget", Some("available"));
+    } else {
+        ui.check(false, "winget", Some("not found (optional, for easy installs)"));
+    }
     Ok(true)
 }
 
@@ -297,5 +289,56 @@ fn format_os_name(os: &str) -> &str {
         "windows" => "Windows",
         "macos" => "macOS",
         _ => "Unknown",
+    }
+}
+
+fn check_odoo_full_packages(
+    pm: PackageManager,
+    family: LinuxFamily,
+) -> Vec<(String, bool)> {
+    use Requirement::*;
+
+    // Keep a stable, minimal set for checks (avoid over-reporting).
+    // The install guide will include the full list.
+    let check_set = [
+        BuildTools,
+        PythonDev,
+        PythonPip,
+        LibPQDev,
+        LibXML2Dev,
+        LibXSLTDev,
+        LibJPEGDev,
+        ZlibDev,
+        OpenSSLDev,
+        LibFFIDev,
+    ];
+
+    check_set
+        .iter()
+        .flat_map(|r| crate::install_guide::linux_pkg_names(pm, family, *r))
+        .map(|pkg| {
+            let ok = check_system_package(&pkg);
+            (pkg, ok)
+        })
+        .collect()
+}
+
+fn print_install_guide(ui: &Ui, ctx: &OsContext) {
+    // No macOS support for now per project preference; keep output focused.
+    if ctx.platform == Platform::Unknown {
+        return;
+    }
+
+    ui.heading("How to install Odoo dependencies (Odoo full)");
+    let guide = build_install_guide(ctx);
+    ui.info(format!("Detected: {}", guide.detected));
+    if let Some(cmd) = guide.command {
+        ui.info("Recommended command:");
+        ui.info(cmd);
+    } else {
+        ui.warn("Could not generate an exact install command for this system.");
+    }
+    for n in guide.notes {
+        ui.info(format!("- {}", n));
     }
 }

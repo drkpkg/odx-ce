@@ -298,6 +298,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "etc-os-release"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a5bb34d25272a56dd40b5397182de049d19e8a2145313a606b7112e7f9343c51"
+dependencies = [
+ "indexmap",
+ "thiserror",
+]
+
+[[package]]
 name = "find-msvc-tools"
 version = "0.1.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -741,6 +751,7 @@ dependencies = [
  "console",
  "ctrlc",
  "dirs",
+ "etc-os-release",
  "git2",
  "indicatif",
  "inquire",
