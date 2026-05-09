@@ -540,7 +540,7 @@ fn collect_addon_modules_under(root: &Path, acc: &mut Vec<(String, PathBuf)>) ->
     Ok(())
 }
 
-/// All addons under `custom_addons` and `external_addons` only (not Odoo core).
+/// All addons under `custom_addons`.
 /// Sorted by technical name. Errors if two different paths share the same addon name.
 pub fn project_addon_modules(project_root: &Path) -> Result<Vec<(String, PathBuf)>, String> {
     let root = project_root
@@ -550,10 +550,6 @@ pub fn project_addon_modules(project_root: &Path) -> Result<Vec<(String, PathBuf
     let custom = root.join("custom_addons");
     if custom.exists() {
         collect_addon_modules_under(&custom, &mut raw)?;
-    }
-    let external = root.join("external_addons");
-    if external.exists() {
-        collect_addon_modules_under(&external, &mut raw)?;
     }
     let mut by_name: HashMap<String, PathBuf> = HashMap::new();
     for (name, path) in raw {
@@ -729,10 +725,10 @@ mod tests {
             std::process::id()
         ));
         let _ = fs::remove_dir_all(&tmp);
-        fs::create_dir_all(tmp.join("custom_addons/a_dup")).unwrap();
-        fs::write(tmp.join("custom_addons/a_dup/__manifest__.py"), "{}").unwrap();
-        fs::create_dir_all(tmp.join("external_addons/a_dup")).unwrap();
-        fs::write(tmp.join("external_addons/a_dup/__manifest__.py"), "{}").unwrap();
+        fs::create_dir_all(tmp.join("custom_addons/org_a/a_dup")).unwrap();
+        fs::write(tmp.join("custom_addons/org_a/a_dup/__manifest__.py"), "{}").unwrap();
+        fs::create_dir_all(tmp.join("custom_addons/org_b/a_dup")).unwrap();
+        fs::write(tmp.join("custom_addons/org_b/a_dup/__manifest__.py"), "{}").unwrap();
 
         let err = project_addon_modules(&tmp).unwrap_err();
         assert!(

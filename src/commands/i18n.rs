@@ -85,7 +85,7 @@ fn resolve_targets(project_root: &Path, module: Option<&str>) -> Result<Vec<(Str
         None => {
             if pairs.is_empty() {
                 return Err(
-                    "No addons found under custom_addons or external_addons.".to_string(),
+                    "No addons found under custom_addons.".to_string(),
                 );
             }
             Ok(pairs)
@@ -97,7 +97,7 @@ fn resolve_targets(project_root: &Path, module: Option<&str>) -> Result<Vec<(Str
                 }
             }
             Err(format!(
-                "Unknown module {:?}. It must exist under custom_addons or external_addons with __manifest__.py",
+                "Unknown module {:?}. It must exist under custom_addons with __manifest__.py",
                 name
             ))
         }
