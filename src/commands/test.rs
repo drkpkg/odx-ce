@@ -1,10 +1,25 @@
-use crate::utils::{
-    ensure_odoo_conf_local, execute_command, find_project_root, find_python_command, ensure_venv,
-};
 use crate::commands::db::drop_db;
-use std::time::{SystemTime, UNIX_EPOCH};
+use crate::utils::{
+    ensure_odoo_conf_local, execute_command_with_env, execute_command_streaming_with_env,
+    find_project_root, find_python_command, ensure_venv, StreamSource,
+};
+use regex::Regex;
+use std::collections::{BTreeSet, HashMap};
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-pub fn execute(tags: &[String]) -> Result<(), String> {
+pub fn execute(
+    tags: &[String],
+    heartbeat_seconds: u64,
+    log_file: Option<&str>,
+    no_log_file: bool,
+    odoo_log_level: &str,
+) -> Result<(), String> {
     ensure_venv()?;
 
     let project_root = find_project_root()?;
@@ -39,6 +54,70 @@ pub fn execute(tags: &[String]) -> Result<(), String> {
     let odoo_bin_str = odoo_bin.to_string_lossy().to_string();
     let config_file_str = config_file.to_string_lossy().to_string();
 
+    // Preflight wkhtmltopdf to avoid hanging tests.
+    let (wkhtml_path, wkhtml_dir) = detect_wkhtmltopdf()?;
+    let path_env = build_path_env(&wkhtml_dir)?;
+    let envs = [("PATH", path_env.as_str())];
+    println!("wkhtmltopdf: {}", wkhtml_path);
+
+    // Always attempt to drop the temporary database.
+    let dropped = Arc::new(AtomicBool::new(false));
+    let cleanup_db = {
+        let db_name = db_name.clone();
+        let dropped = dropped.clone();
+        move || {
+            if dropped.swap(true, Ordering::SeqCst) {
+                return;
+            }
+            eprintln!("Step 4: Cleaning up temporary database...");
+            if let Err(drop_err) = drop_db(&db_name, true, true) {
+                eprintln!("Warning: Failed to drop temporary database {}: {}", db_name, drop_err);
+                eprintln!(
+                    "You may need to manually drop it: odx db drop --force --if-exists {}",
+                    db_name
+                );
+            } else {
+                eprintln!("Temporary database {} dropped successfully", db_name);
+            }
+        }
+    };
+
+    struct DropGuard<F: Fn()>(F);
+    impl<F: Fn()> Drop for DropGuard<F> {
+        fn drop(&mut self) {
+            (self.0)();
+        }
+    }
+    let _guard = DropGuard(cleanup_db.clone());
+
+    // Ctrl+C cleanup (cross-platform)
+    {
+        let cleanup = cleanup_db.clone();
+        ctrlc::set_handler(move || {
+            eprintln!("Received Ctrl+C. Attempting to drop temporary database...");
+            cleanup();
+            std::process::exit(130);
+        })
+        .map_err(|e| format!("Failed to set Ctrl+C handler: {}", e))?;
+    }
+
+    // SIGTERM cleanup (unix)
+    #[cfg(unix)]
+    {
+        use signal_hook::consts::signal::SIGTERM;
+        use signal_hook::iterator::Signals;
+        let cleanup = cleanup_db.clone();
+        let mut signals =
+            Signals::new([SIGTERM]).map_err(|e| format!("Failed to register SIGTERM: {}", e))?;
+        std::thread::spawn(move || {
+            for _ in signals.forever() {
+                eprintln!("Received SIGTERM. Attempting to drop temporary database...");
+                cleanup();
+                std::process::exit(143);
+            }
+        });
+    }
+
     // Step 1: Create database and install base module
     println!("Step 1: Creating database and installing base module...");
     let args = vec![
@@ -51,7 +130,10 @@ pub fn execute(tags: &[String]) -> Result<(), String> {
         "--stop-after-init",
         "--without-demo", "all",
     ];
-    execute_command(&python, &args, Some(&project_root))?;
+    if let Err(e) = execute_command_with_env(&python, &args, Some(&project_root), &envs) {
+        cleanup_db();
+        return Err(e);
+    }
 
     // Step 2: Install all custom_addons modules
     println!("Step 2: Installing custom_addons modules...");
@@ -66,40 +148,595 @@ pub fn execute(tags: &[String]) -> Result<(), String> {
         "--stop-after-init",
         "--without-demo", "all",
     ];
-    execute_command(&python, &args, Some(&project_root))?;
+    if let Err(e) = execute_command_with_env(&python, &args, Some(&project_root), &envs) {
+        cleanup_db();
+        return Err(e);
+    }
 
     // Step 3: Run tests
     println!("Step 3: Running tests...");
-    let tags_str = if tags.is_empty() {
-        "+standard".to_string()
-    } else {
-        tags.join(",")
-    };
-    let args = vec![
-        odoo_bin_str.as_str(),
-        "-c",
-        config_file_str.as_str(),
-        "-d",
-        db_name.as_str(),
-        "--test-tags", tags_str.as_str(),
-        "--stop-after-init",
-        "--log-level=warn",
-    ];
-    let test_result = execute_command(&python, &args, Some(&project_root));
+    let tags_to_run = normalize_specs(tags);
+    let log_path = resolve_log_path(&project_root, &db_name, log_file, no_log_file)?;
 
-    // Step 4: Drop database (always, even if tests failed)
-    println!("Step 4: Cleaning up temporary database...");
-    if let Err(drop_err) = drop_db(&db_name, true, true) {
-        eprintln!("Warning: Failed to drop temporary database {}: {}", db_name, drop_err);
-        eprintln!("You may need to manually drop it: odx db drop --force --if-exists {}", db_name);
+    let hb = if heartbeat_seconds == 0 {
+        None
     } else {
-        println!("Temporary database {} dropped successfully", db_name);
+        Some(Duration::from_secs(heartbeat_seconds))
+    };
+
+    let mut runs: Vec<TagRunResult> = Vec::new();
+    let mut warnings: BTreeSet<String> = BTreeSet::new();
+
+    // Discovery (always): find test methods under each module tests/ tree.
+    // Hybrid execution: per-method for small classes, per-class otherwise.
+    let methods = discover_test_methods(&project_root, &modules)?;
+    let class_map = group_methods_by_module_class(&methods);
+
+    for spec in tags_to_run {
+        println!("===== Executing tag: {} =====", spec);
+        let module_filter = extract_module_filter(&spec);
+
+        for module in modules.iter() {
+            if let Some(mf) = &module_filter {
+                if mf != module {
+                    continue;
+                }
+            }
+
+            let classes = match class_map.get(module) {
+                Some(c) => c,
+                None => continue,
+            };
+
+            println!("===== Module: {} =====", module);
+
+            let mut class_names: Vec<&String> = classes.keys().collect();
+            class_names.sort();
+            for class_name in class_names {
+                let method_names = &classes[class_name];
+                if method_names.is_empty() {
+                    continue;
+                }
+
+                println!(
+                    "===== Class: {} ({} methods) =====",
+                    class_name,
+                    method_names.len()
+                );
+
+                let method_threshold: usize = 20;
+                if method_names.len() <= method_threshold {
+                    for (idx, method_name) in method_names.iter().enumerate() {
+                        println!(
+                            "===== Method {}/{}: {} =====",
+                            idx + 1,
+                            method_names.len(),
+                            method_name
+                        );
+                        let selector =
+                            inject_selector_method(&spec, module, class_name, method_name);
+                        run_one_selector(
+                            &python,
+                            &project_root,
+                            &envs,
+                            &odoo_bin_str,
+                            &config_file_str,
+                            &db_name,
+                            &selector,
+                            odoo_log_level,
+                            hb,
+                            log_path.as_deref(),
+                            &mut warnings,
+                            &mut runs,
+                            heartbeat_seconds,
+                        );
+                    }
+                } else {
+                    let selector = inject_selector_class(&spec, module, class_name);
+                    run_one_selector(
+                        &python,
+                        &project_root,
+                        &envs,
+                        &odoo_bin_str,
+                        &config_file_str,
+                        &db_name,
+                        &selector,
+                        odoo_log_level,
+                        hb,
+                        log_path.as_deref(),
+                        &mut warnings,
+                        &mut runs,
+                        heartbeat_seconds,
+                    );
+                }
+            }
+        }
     }
 
-    // Return the test result
-    test_result?;
+    print_summary(&runs, &warnings, log_path.as_deref());
+
+    cleanup_db();
+
+    if runs.iter().any(|r| !r.passed) {
+        return Err("One or more test runs failed".to_string());
+    }
 
     Ok(())
+}
+
+fn run_one_selector(
+    python: &str,
+    project_root: &Path,
+    envs: &[(&str, &str)],
+    odoo_bin_str: &str,
+    config_file_str: &str,
+    db_name: &str,
+    selector: &str,
+    odoo_log_level: &str,
+    hb: Option<Duration>,
+    log_path: Option<&Path>,
+    warnings: &mut BTreeSet<String>,
+    runs: &mut Vec<TagRunResult>,
+    heartbeat_seconds: u64,
+) {
+    println!("===== Executing: {} =====", selector);
+
+    let mut parser = OutputParser::new();
+    let heartbeat_msg = if heartbeat_seconds == 0 {
+        "===== Still running tests (no heartbeat configured) =====".to_string()
+    } else {
+        format!(
+            "===== Still running tests: {} (no output for {}s) =====",
+            selector, heartbeat_seconds
+        )
+    };
+
+    let log_level_arg = format!("--log-level={}", odoo_log_level);
+    let args = vec![
+        odoo_bin_str,
+        "-c",
+        config_file_str,
+        "-d",
+        db_name,
+        "--test-tags",
+        selector,
+        "--stop-after-init",
+        log_level_arg.as_str(),
+    ];
+
+    let result = execute_command_streaming_with_env(
+        python,
+        &args,
+        Some(project_root),
+        envs,
+        |src, line| match src {
+            StreamSource::Stdout => {
+                println!("{}", line);
+                parser.ingest(line);
+            }
+            StreamSource::Stderr => {
+                eprintln!("{}", line);
+                parser.ingest(line);
+            }
+        },
+        log_path,
+        hb,
+        &heartbeat_msg,
+    );
+
+    for w in parser.warnings.iter() {
+        if warnings.len() < 200 {
+            warnings.insert(w.to_string());
+        }
+    }
+
+    match result {
+        Ok(_) => {
+            println!("===== Test passed: {} =====", selector);
+            runs.push(TagRunResult::from_parser(selector.to_string(), true, &parser));
+        }
+        Err(err) => {
+            eprintln!("===== Test failed: {} =====", selector);
+            eprintln!("{}", err);
+            runs.push(TagRunResult::from_parser(selector.to_string(), false, &parser));
+        }
+    }
+}
+
+fn detect_wkhtmltopdf() -> Result<(String, PathBuf), String> {
+    let p = which::which("wkhtmltopdf")
+        .map_err(|_| "wkhtmltopdf not found on this system. Install wkhtmltopdf 0.12.6.1 (with patched qt).".to_string())?;
+    let path_str = p.to_string_lossy().to_string();
+
+    // Best-effort version check
+    let out = std::process::Command::new(&path_str)
+        .arg("-V")
+        .output()
+        .ok();
+    if let Some(o) = out {
+        let text = format!(
+            "{} {}",
+            String::from_utf8_lossy(&o.stdout),
+            String::from_utf8_lossy(&o.stderr)
+        );
+        if !text.contains("0.12.6.1") || !text.to_lowercase().contains("patched qt") {
+            eprintln!(
+                "Warning: wkhtmltopdf version does not look like 0.12.6.1 (with patched qt). Output: {}",
+                text.trim()
+            );
+        }
+    }
+
+    let dir = p
+        .parent()
+        .ok_or_else(|| format!("Invalid wkhtmltopdf path: {}", path_str))?
+        .to_path_buf();
+    Ok((path_str, dir))
+}
+
+fn build_path_env(extra_dir: &Path) -> Result<String, String> {
+    let current = std::env::var("PATH").unwrap_or_default();
+    let extra = extra_dir.to_string_lossy();
+    // Put wkhtmltopdf directory first to ensure Odoo finds it.
+    Ok(format!("{}:{}", extra, current))
+}
+
+#[derive(Debug, Clone)]
+struct MethodSpec {
+    module: String,
+    class_name: String,
+    method_name: String,
+}
+
+fn group_methods_by_module_class(
+    methods: &[MethodSpec],
+) -> HashMap<String, HashMap<String, Vec<String>>> {
+    let mut out: HashMap<String, HashMap<String, Vec<String>>> = HashMap::new();
+    for m in methods {
+        out.entry(m.module.clone())
+            .or_default()
+            .entry(m.class_name.clone())
+            .or_default()
+            .push(m.method_name.clone());
+    }
+    for (_module, classes) in out.iter_mut() {
+        for (_class, method_names) in classes.iter_mut() {
+            method_names.sort();
+        }
+    }
+    out
+}
+
+fn extract_module_filter(spec: &str) -> Option<String> {
+    let re = Regex::new(r"/([A-Za-z0-9_]+)").unwrap();
+    for part in spec.split(',').map(|s| s.trim()) {
+        if let Some(caps) = re.captures(part) {
+            return Some(caps.get(1).unwrap().as_str().to_string());
+        }
+    }
+    None
+}
+
+fn inject_selector_class(spec: &str, module: &str, class_name: &str) -> String {
+    inject_selector(spec, module, Some(class_name), None)
+}
+
+fn inject_selector_method(spec: &str, module: &str, class_name: &str, method: &str) -> String {
+    inject_selector(spec, module, Some(class_name), Some(method))
+}
+
+fn inject_selector(spec: &str, module: &str, class_name: Option<&str>, method: Option<&str>) -> String {
+    let mut parts: Vec<String> = spec
+        .split(',')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .collect();
+
+    let mut replaced = false;
+    let module_prefix = format!("/{module}");
+    for p in parts.iter_mut() {
+        if p.starts_with(&module_prefix) && !p.contains(':') && !p.contains('.') {
+            let base = match class_name {
+                Some(cls) => format!("/{module}:{cls}"),
+                None => format!("/{module}"),
+            };
+            let full = match method {
+                Some(m) => format!("{}.{}", base, m),
+                None => base,
+            };
+            *p = full;
+            replaced = true;
+        }
+    }
+
+    if !replaced {
+        let base = match class_name {
+            Some(cls) => format!("/{module}:{cls}"),
+            None => format!("/{module}"),
+        };
+        let full = match method {
+            Some(m) => format!("{}.{}", base, m),
+            None => base,
+        };
+        parts.push(full);
+    }
+
+    parts.join(",")
+}
+
+fn discover_test_methods(project_root: &Path, modules: &[String]) -> Result<Vec<MethodSpec>, String> {
+    let custom_addons = project_root.join("custom_addons");
+    let mut out = Vec::new();
+    for module in modules {
+        if let Some(module_root) = find_addon_root_by_name(&custom_addons, module) {
+            let tests_dir = module_root.join("tests");
+            if !tests_dir.exists() {
+                continue;
+            }
+            collect_methods_from_tests_dir(module, &tests_dir, &mut out)?;
+        }
+    }
+    Ok(out)
+}
+
+fn find_addon_root_by_name(root: &Path, addon_name: &str) -> Option<PathBuf> {
+    if !root.exists() {
+        return None;
+    }
+    let entries = fs::read_dir(root).ok()?;
+    for entry in entries.flatten() {
+        let p = entry.path();
+        if !p.is_dir() {
+            continue;
+        }
+        // If this dir is an addon, compare name
+        if p.join("__manifest__.py").exists() {
+            if p.file_name().and_then(|n| n.to_str()) == Some(addon_name) {
+                return Some(p);
+            }
+            continue;
+        }
+        if let Some(found) = find_addon_root_by_name(&p, addon_name) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+fn collect_methods_from_tests_dir(
+    module: &str,
+    tests_dir: &Path,
+    out: &mut Vec<MethodSpec>,
+) -> Result<(), String> {
+    let entries = fs::read_dir(tests_dir)
+        .map_err(|e| format!("Failed to read tests directory {}: {}", tests_dir.display(), e))?;
+    for entry in entries.flatten() {
+        let p = entry.path();
+        if p.is_dir() {
+            collect_methods_from_tests_dir(module, &p, out)?;
+            continue;
+        }
+        if p.extension().and_then(|e| e.to_str()) != Some("py") {
+            continue;
+        }
+        let content = fs::read_to_string(&p)
+            .map_err(|e| format!("Failed to read {}: {}", p.display(), e))?;
+        out.extend(parse_test_methods_from_file(module, &content));
+    }
+    Ok(())
+}
+
+fn parse_test_methods_from_file(module: &str, content: &str) -> Vec<MethodSpec> {
+    // Heuristic parser: find `class X(...):` and `def test_...`
+    // This is intentionally simple and avoids importing Python.
+    let class_re = Regex::new(r"^class\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(").unwrap();
+    let def_re = Regex::new(r"^\s*def\s+(test_[A-Za-z0-9_]+)\s*\(").unwrap();
+
+    let mut current_class: Option<String> = None;
+    let mut results = Vec::new();
+    for line in content.lines() {
+        if let Some(caps) = class_re.captures(line) {
+            current_class = Some(caps.get(1).unwrap().as_str().to_string());
+            continue;
+        }
+        if let Some(caps) = def_re.captures(line) {
+            if let Some(cls) = &current_class {
+                results.push(MethodSpec {
+                    module: module.to_string(),
+                    class_name: cls.to_string(),
+                    method_name: caps.get(1).unwrap().as_str().to_string(),
+                });
+            }
+        }
+    }
+    results
+}
+
+fn normalize_specs(raw: &[String]) -> Vec<String> {
+    let mut out = Vec::<String>::new();
+    for t in raw {
+        let s = t.trim();
+        if !s.is_empty() {
+            out.push(s.to_string());
+        }
+    }
+    if out.is_empty() {
+        out.push("+standard".to_string());
+    }
+    out
+}
+
+fn resolve_log_path(
+    project_root: &Path,
+    db_name: &str,
+    log_file: Option<&str>,
+    no_log_file: bool,
+) -> Result<Option<PathBuf>, String> {
+    if no_log_file {
+        return Ok(None);
+    }
+    if let Some(p) = log_file {
+        let pb = PathBuf::from(p);
+        if pb.is_absolute() {
+            return Ok(Some(pb));
+        }
+        return Ok(Some(project_root.join(pb)));
+    }
+    Ok(Some(
+        project_root
+            .join(".testing/logs")
+            .join(format!("odx-test-{}.log", db_name)),
+    ))
+}
+
+#[derive(Debug)]
+struct OutputParser {
+    warnings: Vec<String>,
+    ran_tests: Option<u32>,
+    failed: bool,
+    skipped: Option<u32>,
+    failures: Option<u32>,
+    errors: Option<u32>,
+    warning_re: Regex,
+    ran_re: Regex,
+    failed_re: Regex,
+}
+
+impl OutputParser {
+    fn new() -> Self {
+        Self {
+            warnings: Vec::new(),
+            ran_tests: None,
+            failed: false,
+            skipped: None,
+            failures: None,
+            errors: None,
+            warning_re: Regex::new(
+                r"\b(DeprecationWarning|PendingDeprecationWarning|FutureWarning|UserWarning|RuntimeWarning|ResourceWarning|SyntaxWarning|ImportWarning)\b",
+            )
+            .unwrap(),
+            ran_re: Regex::new(r"^Ran\s+(\d+)\s+tests?\s+in\s+").unwrap(),
+            failed_re: Regex::new(r"^FAILED\s*\((.+)\)\s*$").unwrap(),
+        }
+    }
+
+    fn ingest(&mut self, line: &str) {
+        self.collect_warning(line);
+        self.parse_unittest_summary(line);
+    }
+
+    fn collect_warning(&mut self, line: &str) {
+        if self.warning_re.is_match(line) {
+            if self.warnings.len() < 200 {
+                self.warnings.push(line.to_string());
+            }
+        }
+        if line.contains(" WARNING ") || line.starts_with("WARNING") {
+            if self.warnings.len() < 200 {
+                self.warnings.push(line.to_string());
+            }
+        }
+    }
+
+    fn parse_unittest_summary(&mut self, line: &str) {
+        if let Some(caps) = self.ran_re.captures(line) {
+            if let Ok(n) = caps.get(1).unwrap().as_str().parse::<u32>() {
+                self.ran_tests = Some(n);
+            }
+        }
+
+        if line.trim() == "OK" {
+            self.failed = false;
+        }
+
+        if let Some(caps) = self.failed_re.captures(line.trim()) {
+            self.failed = true;
+            let inside = caps.get(1).unwrap().as_str();
+            let mut map: HashMap<&str, u32> = HashMap::new();
+            for part in inside.split(',') {
+                let part = part.trim();
+                if let Some((k, v)) = part.split_once('=') {
+                    if let Ok(n) = v.trim().parse::<u32>() {
+                        map.insert(k.trim(), n);
+                    }
+                }
+            }
+            self.failures = map.get("failures").copied();
+            self.errors = map.get("errors").copied();
+            self.skipped = map.get("skipped").copied();
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct TagRunResult {
+    tag: String,
+    passed: bool,
+    ran_tests: Option<u32>,
+    failures: Option<u32>,
+    errors: Option<u32>,
+    skipped: Option<u32>,
+}
+
+impl TagRunResult {
+    fn from_parser(tag: String, passed: bool, parser: &OutputParser) -> Self {
+        Self {
+            tag,
+            passed,
+            ran_tests: parser.ran_tests,
+            failures: parser.failures,
+            errors: parser.errors,
+            skipped: parser.skipped,
+        }
+    }
+}
+
+fn print_summary(runs: &[TagRunResult], warnings: &BTreeSet<String>, log_path: Option<&Path>) {
+    let total = runs.len();
+    let passed = runs.iter().filter(|r| r.passed).count();
+    let failed = total - passed;
+
+    println!();
+    println!("================= Test Summary =================");
+    println!("Total runs: {}", total);
+    println!("Passed: {}", passed);
+    println!("Failed: {}", failed);
+
+    let total_skipped: u32 = runs.iter().filter_map(|r| r.skipped).sum();
+    let have_skipped = runs.iter().any(|r| r.skipped.is_some());
+    if have_skipped {
+        println!("Skipped (parsed): {}", total_skipped);
+    }
+
+    if failed > 0 {
+        println!();
+        println!("Failures:");
+        for r in runs.iter().filter(|r| !r.passed) {
+            println!(
+                "- {} (ran={:?}, failures={:?}, errors={:?}, skipped={:?})",
+                r.tag, r.ran_tests, r.failures, r.errors, r.skipped
+            );
+        }
+    }
+
+    if !warnings.is_empty() {
+        println!();
+        println!("Warnings (unique, capped): {}", warnings.len());
+        for w in warnings.iter().take(50) {
+            println!("- {}", w);
+        }
+        if warnings.len() > 50 {
+            println!("... ({} more)", warnings.len() - 50);
+        }
+    }
+
+    if let Some(p) = log_path {
+        println!();
+        println!("Log file: {}", p.display());
+    }
+
+    println!("================================================");
 }
 
 fn find_custom_modules(custom_addons_path: &std::path::Path) -> Result<Vec<String>, String> {

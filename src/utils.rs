@@ -3,6 +3,11 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::io::{BufRead, BufReader, Write};
+use std::sync::{Arc, Mutex};
+use std::sync::mpsc;
+use std::thread;
+use std::time::{Duration, Instant};
 
 pub fn find_project_root() -> Result<PathBuf, String> {
     let mut current =
@@ -64,12 +69,25 @@ pub fn execute_command(
     args: &[&str],
     working_dir: Option<&Path>,
 ) -> Result<(), String> {
+    execute_command_with_env(program, args, working_dir, &[])
+}
+
+pub fn execute_command_with_env(
+    program: &str,
+    args: &[&str],
+    working_dir: Option<&Path>,
+    envs: &[(&str, &str)],
+) -> Result<(), String> {
     let mut cmd = Command::new(program);
 
     cmd.args(args);
 
     if let Some(dir) = working_dir {
         cmd.current_dir(dir);
+    }
+
+    for (k, v) in envs {
+        cmd.env(k, v);
     }
 
     cmd.stdin(Stdio::inherit())
@@ -88,6 +106,161 @@ pub fn execute_command(
     }
 
     Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamSource {
+    Stdout,
+    Stderr,
+}
+
+/// Execute a command with stdout/stderr streamed line-by-line.
+/// - `on_line` is called for each output line (stdout or stderr).
+/// - If `log_file` is provided, all output lines are appended to it.
+/// - If `heartbeat` is provided, a heartbeat line is emitted when no output is seen within that duration.
+pub fn execute_command_streaming<F>(
+    program: &str,
+    args: &[&str],
+    working_dir: Option<&Path>,
+    on_line: F,
+    log_file: Option<&Path>,
+    heartbeat: Option<Duration>,
+    heartbeat_message: &str,
+) -> Result<i32, String>
+where
+    F: FnMut(StreamSource, &str),
+{
+    execute_command_streaming_with_env(
+        program,
+        args,
+        working_dir,
+        &[],
+        on_line,
+        log_file,
+        heartbeat,
+        heartbeat_message,
+    )
+}
+
+pub fn execute_command_streaming_with_env<F>(
+    program: &str,
+    args: &[&str],
+    working_dir: Option<&Path>,
+    envs: &[(&str, &str)],
+    mut on_line: F,
+    log_file: Option<&Path>,
+    heartbeat: Option<Duration>,
+    heartbeat_message: &str,
+) -> Result<i32, String>
+where
+    F: FnMut(StreamSource, &str),
+{
+    let mut cmd = Command::new(program);
+    cmd.args(args);
+    if let Some(dir) = working_dir {
+        cmd.current_dir(dir);
+    }
+    for (k, v) in envs {
+        cmd.env(k, v);
+    }
+
+    cmd.stdin(Stdio::inherit())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("Failed to spawn {}: {}", program, e))?;
+
+    let stdout = child.stdout.take().ok_or("Failed to capture stdout")?;
+    let stderr = child.stderr.take().ok_or("Failed to capture stderr")?;
+
+    let log_handle: Option<Arc<Mutex<fs::File>>> = if let Some(path) = log_file {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|e| format!("Failed to create log directory {}: {}", parent.display(), e))?;
+        }
+        let f = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .map_err(|e| format!("Failed to open log file {}: {}", path.display(), e))?;
+        Some(Arc::new(Mutex::new(f)))
+    } else {
+        None
+    };
+
+    let (tx, rx) = mpsc::channel::<(StreamSource, String)>();
+
+    {
+        let tx = tx.clone();
+        let log = log_handle.clone();
+        thread::spawn(move || {
+            let reader = BufReader::new(stdout);
+            for line in reader.lines().flatten() {
+                if let Some(l) = &log {
+                    if let Ok(mut f) = l.lock() {
+                        let _ = writeln!(f, "{}", line);
+                    }
+                }
+                let _ = tx.send((StreamSource::Stdout, line));
+            }
+        });
+    }
+
+    {
+        let tx = tx;
+        let log = log_handle.clone();
+        thread::spawn(move || {
+            let reader = BufReader::new(stderr);
+            for line in reader.lines().flatten() {
+                if let Some(l) = &log {
+                    if let Ok(mut f) = l.lock() {
+                        let _ = writeln!(f, "{}", line);
+                    }
+                }
+                let _ = tx.send((StreamSource::Stderr, line));
+            }
+        });
+    }
+
+    let mut last_output = Instant::now();
+    loop {
+        match heartbeat {
+            Some(hb) => match rx.recv_timeout(Duration::from_millis(250)) {
+                Ok((src, line)) => {
+                    last_output = Instant::now();
+                    on_line(src, &line);
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    if last_output.elapsed() >= hb {
+                        last_output = Instant::now();
+                        on_line(StreamSource::Stdout, heartbeat_message);
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            },
+            None => match rx.recv_timeout(Duration::from_millis(250)) {
+                Ok((src, line)) => on_line(src, &line),
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            },
+        }
+    }
+
+    let status = child
+        .wait()
+        .map_err(|e| format!("Failed to wait for {}: {}", program, e))?;
+    let code = status.code().unwrap_or_else(|| if status.success() { 0 } else { 1 });
+
+    if !status.success() {
+        return Err(format!(
+            "Command failed with exit code: {:?}",
+            status.code()
+        ));
+    }
+
+    Ok(code)
 }
 
 pub fn find_docker_compose_command() -> Result<String, String> {

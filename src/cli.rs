@@ -62,6 +62,18 @@ pub enum Commands {
     Test {
         /// Test tags (comma-separated or space-separated)
         tags: Vec<String>,
+        /// Emit a heartbeat line if no output is produced for N seconds (0 disables)
+        #[arg(long, default_value_t = 60)]
+        heartbeat_seconds: u64,
+        /// Write full output to a log file (defaults to .testing/logs/odx-test-<db>.log)
+        #[arg(long)]
+        log_file: Option<String>,
+        /// Disable log file writing
+        #[arg(long, default_value_t = false)]
+        no_log_file: bool,
+        /// Odoo log level for the test run (e.g. info, warn, error, debug)
+        #[arg(long, default_value = "warn")]
+        odoo_log_level: String,
     },
 
     /// Install/update Python dependencies
@@ -107,7 +119,19 @@ impl Cli {
                 module,
                 lang,
             } => commands::i18n::execute(&database, module.as_deref(), lang.as_deref()),
-            Commands::Test { tags } => commands::test::execute(&tags),
+            Commands::Test {
+                tags,
+                heartbeat_seconds,
+                log_file,
+                no_log_file,
+                odoo_log_level,
+            } => commands::test::execute(
+                &tags,
+                heartbeat_seconds,
+                log_file.as_deref(),
+                no_log_file,
+                &odoo_log_level,
+            ),
             Commands::Install => commands::install::execute(),
             Commands::Sync => commands::sync::execute(),
             Commands::Setup => commands::setup::execute(),
