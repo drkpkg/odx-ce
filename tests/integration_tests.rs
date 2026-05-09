@@ -117,6 +117,19 @@ fn test_doctor_command() {
 }
 
 #[test]
+fn test_doctor_json_mode_succeeds() {
+    let odoo_bin = get_odoo_binary();
+
+    let output = Command::new(&odoo_bin)
+        .arg("--json")
+        .arg("doctor")
+        .output()
+        .expect("Failed to execute doctor in --json mode");
+
+    assert!(output.status.success(), "Doctor should succeed in --json mode");
+}
+
+#[test]
 fn test_new_project_17() {
     test_new_project("17.0", "test_project_17");
 }

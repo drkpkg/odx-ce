@@ -1,24 +1,27 @@
 use crate::utils::{create_venv, execute_command, find_project_root};
+use crate::ui::Ui;
 use std::fs;
 use std::path::Path;
 
-pub fn execute() -> Result<(), String> {
+pub fn execute(ui: &Ui) -> Result<(), String> {
     let project_root = find_project_root()?;
 
-    println!("Setting up development environment...");
+    ui.heading("Setting up development environment...");
 
     // Create virtual environment directly using Rust helper
     // This avoids executing any Python scripts from the project scripts directory.
+    let _sp = ui.spinner("Creating virtual environment...");
     create_venv(&project_root, "python")?;
 
-    println!("\nBuilding Odoo CLI...");
+    ui.info("");
+    let _sp = ui.spinner("Building odx...");
     build_cli(&project_root)?;
 
-    println!("Installing Odoo CLI binary...");
-    install_cli(&project_root)?;
+    let _sp = ui.spinner("Installing odx binary into venv...");
+    install_cli(ui, &project_root)?;
 
-    println!("Setup completed successfully!");
-    println!("You can now use 'odx' command from anywhere in the project.");
+    ui.success("Setup completed successfully!");
+    ui.info("You can now use 'odx' command from anywhere in the project.");
 
     Ok(())
 }
@@ -37,7 +40,7 @@ fn build_cli(project_root: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn install_cli(project_root: &Path) -> Result<(), String> {
+fn install_cli(ui: &Ui, project_root: &Path) -> Result<(), String> {
     let release_dir = project_root.join("cli/target/release");
 
     let binary_name = if cfg!(windows) { "odx.exe" } else { "odx" };
@@ -76,7 +79,7 @@ fn install_cli(project_root: &Path) -> Result<(), String> {
             .map_err(|e| format!("Failed to set permissions: {}", e))?;
     }
 
-    println!("Odoo CLI installed to: {}", target_binary.display());
+    ui.success(format!("odx installed to: {}", target_binary.display()));
 
     Ok(())
 }

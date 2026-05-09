@@ -1,5 +1,6 @@
 use crate::commands;
-use clap::{Parser, Subcommand};
+use crate::ui::{ColorMode, Ui, UiConfig};
+use clap::{Parser, Subcommand, ValueEnum};
 
 #[derive(Parser)]
 #[command(name = "odx")]
@@ -9,8 +10,41 @@ pub struct Cli {
     #[arg(global = true, long, default_value = "3.11")]
     pub python: String,
 
+    /// Output format suitable for scripts/CI (disables colors, spinners and prompts)
+    #[arg(global = true, long, default_value_t = false)]
+    pub json: bool,
+
+    /// Reduce output (keeps errors)
+    #[arg(global = true, long, default_value_t = false)]
+    pub quiet: bool,
+
+    /// Control colored output
+    #[arg(global = true, long, value_enum, default_value_t = CliColor::Auto)]
+    pub color: CliColor,
+
+    /// Disable progress indicators (spinners/progress bars)
+    #[arg(global = true, long, default_value_t = false)]
+    pub no_progress: bool,
+
     #[command(subcommand)]
     pub command: Commands,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum CliColor {
+    Auto,
+    Always,
+    Never,
+}
+
+impl From<CliColor> for ColorMode {
+    fn from(v: CliColor) -> Self {
+        match v {
+            CliColor::Auto => ColorMode::Auto,
+            CliColor::Always => ColorMode::Always,
+            CliColor::Never => ColorMode::Never,
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -106,19 +140,26 @@ pub enum Commands {
 
 impl Cli {
     pub fn run(self) -> Result<(), String> {
+        let ui = Ui::new(UiConfig {
+            color: self.color.into(),
+            quiet: self.quiet,
+            json: self.json,
+            progress: !self.no_progress,
+        });
+
         match self.command {
-            Commands::Run => commands::run::execute(),
-            Commands::Update { database } => commands::update::execute(&database),
+            Commands::Run => commands::run::execute(&ui),
+            Commands::Update { database } => commands::update::execute(&ui, &database),
             Commands::UpdateModule { module, database } => {
-                commands::update_module::execute(&module, &database)
+                commands::update_module::execute(&ui, &module, &database)
             }
-            Commands::Shell { database } => commands::shell::execute(&database),
-            Commands::Db(cmd) => commands::db::execute(cmd),
+            Commands::Shell { database } => commands::shell::execute(&ui, &database),
+            Commands::Db(cmd) => commands::db::execute(&ui, cmd),
             Commands::I18n {
                 database,
                 module,
                 lang,
-            } => commands::i18n::execute(&database, module.as_deref(), lang.as_deref()),
+            } => commands::i18n::execute(&ui, &database, module.as_deref(), lang.as_deref()),
             Commands::Test {
                 tags,
                 heartbeat_seconds,
@@ -126,22 +167,23 @@ impl Cli {
                 no_log_file,
                 odoo_log_level,
             } => commands::test::execute(
+                &ui,
                 &tags,
                 heartbeat_seconds,
                 log_file.as_deref(),
                 no_log_file,
                 &odoo_log_level,
             ),
-            Commands::Install => commands::install::execute(),
-            Commands::Sync => commands::sync::execute(),
-            Commands::Setup => commands::setup::execute(),
-            Commands::Clean => commands::clean::execute(),
+            Commands::Install => commands::install::execute(&ui),
+            Commands::Sync => commands::sync::execute(&ui),
+            Commands::Setup => commands::setup::execute(&ui),
+            Commands::Clean => commands::clean::execute(&ui),
             Commands::New {
                 project_name,
                 version,
                 cd,
-            } => commands::new::execute(&project_name, &version, cd, &self.python),
-            Commands::Doctor => commands::doctor::execute(),
+            } => commands::new::execute(&ui, &project_name, &version, cd, &self.python),
+            Commands::Doctor => commands::doctor::execute(&ui),
         }
     }
 }

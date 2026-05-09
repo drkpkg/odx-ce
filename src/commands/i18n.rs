@@ -1,6 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::ui::Ui;
 use crate::utils::{
     build_addons_path, ensure_odoo_conf_local, ensure_venv, execute_command, find_project_root,
     find_python_command, project_addon_modules,
@@ -8,7 +9,12 @@ use crate::utils::{
 
 const TEMPLATE_LANG: &str = "en_US";
 
-pub fn execute(database: &str, module: Option<&str>, lang: Option<&str>) -> Result<(), String> {
+pub fn execute(
+    ui: &Ui,
+    database: &str,
+    module: Option<&str>,
+    lang: Option<&str>,
+) -> Result<(), String> {
     ensure_venv()?;
 
     let project_root = find_project_root()?;
@@ -73,7 +79,7 @@ pub fn execute(database: &str, module: Option<&str>, lang: Option<&str>) -> Resu
 
         execute_command(&python, &args, Some(&project_root))?;
 
-        println!("Exported translations to {}", export_path.display());
+        ui.success(format!("Exported translations to {}", export_path.display()));
     }
 
     Ok(())
