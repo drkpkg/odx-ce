@@ -181,7 +181,9 @@ pub fn execute(
 
     for spec in tags_to_run {
         println!("===== Executing tag: {} =====", spec);
-        let module_filter = extract_module_filter(&spec);
+        let effective_spec = effective_spec_for_execution(&spec);
+        let target = parse_structural_selector(&effective_spec);
+        let module_filter = extract_module_filter(&effective_spec);
 
         for module in modules.iter() {
             if let Some(mf) = &module_filter {
@@ -199,6 +201,71 @@ pub fn execute(
 
             let mut class_names: Vec<&String> = classes.keys().collect();
             class_names.sort();
+
+            // If the user requested a specific class (and optionally method),
+            // only execute that class within this module.
+            if let Some(t) = &target {
+                if let Some(target_module) = &t.module {
+                    if target_module != module {
+                        continue;
+                    }
+                }
+                if let Some(target_class) = &t.class_name {
+                    class_names.retain(|c| c.as_str() == target_class);
+                }
+            }
+
+            // If the user requested a specific method, we will only execute that method
+            // in its class and skip per-method discovery expansion.
+            if let Some(t) = &target {
+                if let Some(target_method) = &t.method_name {
+                    if let Some(target_class) = &t.class_name {
+                        // Ensure the class exists for this module.
+                        if let Some(method_names) = classes.get(target_class) {
+                            if method_names.iter().any(|m| m == target_method) {
+                                println!(
+                                    "===== Class: {} (1 method) =====",
+                                    target_class
+                                );
+                                println!("===== Method 1/1: {} =====", target_method);
+
+                                // Run exactly the effective selector (already class.method-specific).
+                                run_one_selector(
+                                    &python,
+                                    &project_root,
+                                    &envs,
+                                    &odoo_bin_str,
+                                    &config_file_str,
+                                    &db_name,
+                                    &effective_spec,
+                                    odoo_log_level,
+                                    hb,
+                                    log_path.as_deref(),
+                                    &mut warnings,
+                                    &mut runs,
+                                    heartbeat_seconds,
+                                );
+                            } else {
+                                eprintln!(
+                                    "Warning: requested method {}.{} not discovered in module {}",
+                                    target_class, target_method, module
+                                );
+                            }
+                        } else {
+                            eprintln!(
+                                "Warning: requested class {} not discovered in module {}",
+                                target_class, module
+                            );
+                        }
+                    } else {
+                        // Method without class is not supported by Odoo selector grammar;
+                        // fall back to existing behavior.
+                    }
+                    // Done with this module for this spec.
+                    continue;
+                }
+            }
+
             for class_name in class_names {
                 let method_names = &classes[class_name];
                 if method_names.is_empty() {
@@ -221,7 +288,7 @@ pub fn execute(
                             method_name
                         );
                         let selector =
-                            inject_selector_method(&spec, module, class_name, method_name);
+                            inject_selector_method(&effective_spec, module, class_name, method_name);
                         run_one_selector(
                             &python,
                             &project_root,
@@ -239,7 +306,7 @@ pub fn execute(
                         );
                     }
                 } else {
-                    let selector = inject_selector_class(&spec, module, class_name);
+                    let selector = inject_selector_class(&effective_spec, module, class_name);
                     run_one_selector(
                         &python,
                         &project_root,
@@ -393,6 +460,90 @@ struct MethodSpec {
     module: String,
     class_name: String,
     method_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StructuralSelector {
+    module: Option<String>,
+    class_name: Option<String>,
+    method_name: Option<String>,
+}
+
+fn parse_structural_selector(spec: &str) -> Option<StructuralSelector> {
+    // Odoo selector grammar (relevant subset):
+    //   [-][tag][/module][:class][.method]
+    // We only parse the first structural selector occurrence and ignore tag-only parts.
+    //
+    // Examples:
+    // - "intn,/partner_vat_unique:TestX.test_y" -> module=partner_vat_unique,class=TestX,method=test_y
+    // - "/partner_vat_unique:TestX" -> module=partner_vat_unique,class=TestX
+    // - ":TestX.test_y" -> class=TestX,method=test_y
+    let re = Regex::new(
+        r"(?x)
+        (?:
+            /(?P<module>[A-Za-z0-9_]+)
+        )?
+        (?:
+            :(?P<class>[A-Za-z_][A-Za-z0-9_]*)
+        )?
+        (?:
+            \.(?P<method>[A-Za-z0-9_]+)
+        )?
+        ",
+    )
+    .unwrap();
+
+    for raw_part in spec.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        // Skip pure tag-only parts early.
+        if !raw_part.contains('/') && !raw_part.contains(':') && !raw_part.contains('.') {
+            continue;
+        }
+
+        // Strip a leading '-' (exclude spec) because we only care about the structural target.
+        let part = raw_part.strip_prefix('-').unwrap_or(raw_part);
+        if let Some(caps) = re.captures(part) {
+            let module = caps.name("module").map(|m| m.as_str().to_string());
+            let class_name = caps.name("class").map(|m| m.as_str().to_string());
+            let method_name = caps.name("method").map(|m| m.as_str().to_string());
+
+            if module.is_none() && class_name.is_none() && method_name.is_none() {
+                continue;
+            }
+            return Some(StructuralSelector {
+                module,
+                class_name,
+                method_name,
+            });
+        }
+    }
+    None
+}
+
+fn has_any_structural_selector(spec: &str) -> bool {
+    parse_structural_selector(spec).is_some()
+}
+
+fn effective_spec_for_execution(spec: &str) -> String {
+    // If the spec includes a structural selector (module/class/method),
+    // strip tag-only parts like "intn" to avoid pulling unrelated suites.
+    //
+    // Keep any comma parts which themselves contain structural selectors.
+    if !has_any_structural_selector(spec) {
+        return spec.trim().to_string();
+    }
+    let kept: Vec<&str> = spec
+        .split(',')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .filter(|p| p.contains('/') || p.contains(':') || p.contains('.'))
+        .collect();
+
+    if kept.is_empty() {
+        // Defensive: if parsing said structural exists but we filtered all parts out,
+        // fall back to original spec.
+        return spec.trim().to_string();
+    }
+    kept.join(",")
 }
 
 fn group_methods_by_module_class(
@@ -788,4 +939,75 @@ fn find_custom_modules(custom_addons_path: &std::path::Path) -> Result<Vec<Strin
     }
 
     Ok(modules)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn effective_spec_keeps_tag_only_specs() {
+        assert_eq!(effective_spec_for_execution("intn"), "intn");
+        assert_eq!(effective_spec_for_execution("a,b,c"), "a,b,c");
+        assert_eq!(effective_spec_for_execution("   intn  "), "intn");
+    }
+
+    #[test]
+    fn effective_spec_strips_tag_only_parts_when_structural_present() {
+        assert_eq!(
+            effective_spec_for_execution("intn,/partner_vat_unique"),
+            "/partner_vat_unique"
+        );
+        assert_eq!(
+            effective_spec_for_execution("intn,/partner_vat_unique:TestX"),
+            "/partner_vat_unique:TestX"
+        );
+        assert_eq!(
+            effective_spec_for_execution("intn,/partner_vat_unique:TestX.test_y"),
+            "/partner_vat_unique:TestX.test_y"
+        );
+        assert_eq!(
+            effective_spec_for_execution("intn, /partner_vat_unique:TestX.test_y , external"),
+            "/partner_vat_unique:TestX.test_y"
+        );
+    }
+
+    #[test]
+    fn parse_structural_selector_module_class_method() {
+        let s = parse_structural_selector("intn,/partner_vat_unique:TestX.test_y").unwrap();
+        assert_eq!(
+            s,
+            StructuralSelector {
+                module: Some("partner_vat_unique".to_string()),
+                class_name: Some("TestX".to_string()),
+                method_name: Some("test_y".to_string())
+            }
+        );
+    }
+
+    #[test]
+    fn parse_structural_selector_class_method_without_module() {
+        let s = parse_structural_selector(":TestX.test_y").unwrap();
+        assert_eq!(
+            s,
+            StructuralSelector {
+                module: None,
+                class_name: Some("TestX".to_string()),
+                method_name: Some("test_y".to_string())
+            }
+        );
+    }
+
+    #[test]
+    fn parse_structural_selector_module_only() {
+        let s = parse_structural_selector("intn,/partner_vat_unique").unwrap();
+        assert_eq!(
+            s,
+            StructuralSelector {
+                module: Some("partner_vat_unique".to_string()),
+                class_name: None,
+                method_name: None
+            }
+        );
+    }
 }
