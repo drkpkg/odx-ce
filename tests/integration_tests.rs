@@ -344,6 +344,29 @@ fn test_commands_exist() {
         "Should have 'db drop' subcommand. Output: {}",
         db_stdout
     );
+
+    let i18n_help = Command::new(&odoo_bin)
+        .arg("i18n")
+        .arg("--help")
+        .output()
+        .expect("Failed to execute 'odx i18n --help'");
+    assert!(i18n_help.status.success(), "'odx i18n --help' should succeed");
+    let i18n_stdout = String::from_utf8_lossy(&i18n_help.stdout);
+    assert!(
+        i18n_stdout.contains("-d") && i18n_stdout.contains("database"),
+        "Should document database flag. Output: {}",
+        i18n_stdout
+    );
+    assert!(
+        i18n_stdout.contains("-m") && i18n_stdout.contains("module"),
+        "Should document module flag. Output: {}",
+        i18n_stdout
+    );
+    assert!(
+        i18n_stdout.contains("--lang"),
+        "Should document --lang. Output: {}",
+        i18n_stdout
+    );
 }
 
 #[test]

@@ -45,12 +45,15 @@ pub enum Commands {
     #[command(subcommand)]
     Db(commands::db::DbCommands),
 
-    /// Generate/update i18n translation files
+    /// Export translations per addon (.pot template or .po for a locale)
     I18n {
-        /// Database name
-        #[arg(short, long)]
-        database: Option<String>,
-        /// Language code (e.g., es_PY) to generate .po file instead of .pot
+        /// PostgreSQL database name (Odoo must be able to connect)
+        #[arg(short = 'd', long)]
+        database: String,
+        /// Single addon technical name (omit to export all project addons under custom_addons and external_addons)
+        #[arg(short = 'm', long)]
+        module: Option<String>,
+        /// Locale for a .po file (e.g. es_BO). Must exist and be active in Settings > Translations > Languages. Omit to write a .pot template using en_US as source language
         #[arg(long)]
         lang: Option<String>,
     },
@@ -99,9 +102,11 @@ impl Cli {
             }
             Commands::Shell { database } => commands::shell::execute(&database),
             Commands::Db(cmd) => commands::db::execute(cmd),
-            Commands::I18n { database, lang } => {
-                commands::i18n::execute(database.as_deref(), lang.as_deref())
-            }
+            Commands::I18n {
+                database,
+                module,
+                lang,
+            } => commands::i18n::execute(&database, module.as_deref(), lang.as_deref()),
             Commands::Test { tags } => commands::test::execute(&tags),
             Commands::Install => commands::install::execute(),
             Commands::Sync => commands::sync::execute(),

@@ -514,6 +514,64 @@ pub fn external_addons_dirs_with_manifest(project_root: &Path) -> Result<Vec<Pat
     Ok(dirs)
 }
 
+/// Recursively collect addon directories (those that contain `__manifest__.py`).
+/// Does not descend into a directory that is itself an addon.
+fn collect_addon_modules_under(root: &Path, acc: &mut Vec<(String, PathBuf)>) -> Result<(), String> {
+    if !root.exists() || !root.is_dir() {
+        return Ok(());
+    }
+    if root.join("__manifest__.py").exists() {
+        let name = root
+            .file_name()
+            .ok_or_else(|| format!("Invalid module path: {}", root.display()))?
+            .to_string_lossy()
+            .into_owned();
+        acc.push((name, root.to_path_buf()));
+        return Ok(());
+    }
+    let entries =
+        fs::read_dir(root).map_err(|e| format!("Failed to read directory {:?}: {}", root, e))?;
+    for entry in entries.filter_map(|e| e.ok()) {
+        let p = entry.path();
+        if p.is_dir() {
+            collect_addon_modules_under(&p, acc)?;
+        }
+    }
+    Ok(())
+}
+
+/// All addons under `custom_addons` and `external_addons` only (not Odoo core).
+/// Sorted by technical name. Errors if two different paths share the same addon name.
+pub fn project_addon_modules(project_root: &Path) -> Result<Vec<(String, PathBuf)>, String> {
+    let root = project_root
+        .canonicalize()
+        .map_err(|e| format!("Failed to canonicalize project root: {}", e))?;
+    let mut raw: Vec<(String, PathBuf)> = Vec::new();
+    let custom = root.join("custom_addons");
+    if custom.exists() {
+        collect_addon_modules_under(&custom, &mut raw)?;
+    }
+    let external = root.join("external_addons");
+    if external.exists() {
+        collect_addon_modules_under(&external, &mut raw)?;
+    }
+    let mut by_name: HashMap<String, PathBuf> = HashMap::new();
+    for (name, path) in raw {
+        if let Some(existing) = by_name.get(&name) {
+            return Err(format!(
+                "Duplicate addon technical name {:?}: {} and {}",
+                name,
+                existing.display(),
+                path.display()
+            ));
+        }
+        by_name.insert(name, path);
+    }
+    let mut pairs: Vec<_> = by_name.into_iter().collect();
+    pairs.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(pairs)
+}
+
 /// Build addons_path: only directories that exist (Odoo rejects non-existent paths).
 /// Includes custom_addons (and subdirs with modules), external_addons (and subdirs), and src/odoo/addons.
 pub fn build_addons_path(project_root: &Path) -> Result<String, String> {
@@ -637,4 +695,52 @@ pub fn detect_odoo_version(project_root: &Path) -> Result<String, String> {
     }
 
     Err("Could not detect Odoo version from release.py or __init__.py".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn project_addon_modules_finds_nested_custom_addons() {
+        let tmp = std::env::temp_dir().join(format!(
+            "odx-project-addon-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(tmp.join("custom_addons/org/my_module")).unwrap();
+        fs::write(
+            tmp.join("custom_addons/org/my_module/__manifest__.py"),
+            "{}",
+        )
+        .unwrap();
+
+        let pairs = project_addon_modules(&tmp).unwrap();
+        assert_eq!(pairs.len(), 1);
+        assert_eq!(pairs[0].0, "my_module");
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn project_addon_modules_duplicate_name_errors() {
+        let tmp = std::env::temp_dir().join(format!(
+            "odx-dup-addon-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(tmp.join("custom_addons/a_dup")).unwrap();
+        fs::write(tmp.join("custom_addons/a_dup/__manifest__.py"), "{}").unwrap();
+        fs::create_dir_all(tmp.join("external_addons/a_dup")).unwrap();
+        fs::write(tmp.join("external_addons/a_dup/__manifest__.py"), "{}").unwrap();
+
+        let err = project_addon_modules(&tmp).unwrap_err();
+        assert!(
+            err.contains("Duplicate addon technical name"),
+            "unexpected error: {}",
+            err
+        );
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
 }
