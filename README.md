@@ -48,6 +48,25 @@ Los scripts dejan los artefactos en `dist/`:
 
 ## Uso del Proyecto
 
+### Comandos
+
+- `odx run`
+- `odx update -d <database>`
+- `odx update-module <module> -d <database>`
+- `odx shell -d <database>`
+- `odx db start|stop|logs|ls|psql`
+- `odx db drop <database> [--force] [--if-exists]`
+- `odx i18n -d <database> [-m <module>] [--lang <code>]`
+- `odx test [<tags>...]`
+- `odx install`
+- `odx sync`
+- `odx setup`
+- `odx clean`
+- `odx new <project> -v <version> [--cd]`
+- `odx doctor`
+
+Opción global: `--python <version>` (por ejemplo `3.11`).
+
 Ejemplos típicos:
 
 ```bash
