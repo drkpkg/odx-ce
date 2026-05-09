@@ -2,12 +2,14 @@ use crate::utils::{
     check_command_exists, create_project_structure, create_venv, execute_command,
     generate_from_template, resolve_python,
 };
+use crate::ui::Ui;
 use regex::Regex;
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
 pub fn execute(
+    _ui: &Ui,
     project_name: &str,
     version: &str,
     cd_into: bool,

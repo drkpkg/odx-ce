@@ -1,6 +1,7 @@
 use crate::utils::{find_project_root, ensure_venv, find_python_command, execute_command};
+use crate::ui::Ui;
 
-pub fn execute() -> Result<(), String> {
+pub fn execute(ui: &Ui) -> Result<(), String> {
     ensure_venv()?;
 
     let project_root = find_project_root()?;
@@ -11,6 +12,7 @@ pub fn execute() -> Result<(), String> {
         return Err(format!("Requirements file not found: {}", requirements.display()));
     }
 
+    let _sp = ui.spinner("Installing Python dependencies (pip)...");
     execute_command(
         &python,
         &[
@@ -24,5 +26,6 @@ pub fn execute() -> Result<(), String> {
         Some(&project_root),
     )?;
 
+    ui.success("Python dependencies installed/updated");
     Ok(())
 }

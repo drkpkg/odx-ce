@@ -1,5 +1,6 @@
 use clap::Subcommand;
 use crate::utils::{find_project_root, execute_command, find_docker_compose_command};
+use crate::ui::Ui;
 
 fn validate_db_name(db: &str) -> Result<(), String> {
     if db.is_empty() {
@@ -44,28 +45,36 @@ pub enum DbCommands {
     },
 }
 
-pub fn execute(cmd: DbCommands) -> Result<(), String> {
+pub fn execute(ui: &Ui, cmd: DbCommands) -> Result<(), String> {
     match cmd {
-        DbCommands::Start => start(),
-        DbCommands::Stop => stop(),
-        DbCommands::Logs => logs(),
-        DbCommands::Ls => ls(),
-        DbCommands::Psql => psql(),
+        DbCommands::Start => start(ui),
+        DbCommands::Stop => stop(ui),
+        DbCommands::Logs => logs(ui),
+        DbCommands::Ls => ls(ui),
+        DbCommands::Psql => psql(ui),
         DbCommands::Drop {
             database,
             force,
             if_exists,
-        } => drop_db(&database, force, if_exists),
+        } => drop_db(ui, &database, force, if_exists),
     }
 }
 
-pub(crate) fn drop_db(database: &str, force: bool, if_exists: bool) -> Result<(), String> {
+pub(crate) fn drop_db(ui: &Ui, database: &str, force: bool, if_exists: bool) -> Result<(), String> {
     validate_db_name(database)?;
 
     let project_root = find_project_root()?;
     let docker_compose = find_docker_compose_command()?;
 
-    println!("Dropping database: {}", database);
+    if !force {
+        ui.warn(format!("About to drop database: {}", database));
+        let ok = ui.prompt_confirm("Continue?", false)?;
+        if !ok {
+            return Err("Canceled".to_string());
+        }
+    } else {
+        ui.info(format!("Dropping database: {}", database));
+    }
 
     let mut args: Vec<String> = Vec::new();
     if docker_compose == "docker compose" {
@@ -98,25 +107,25 @@ pub(crate) fn drop_db(database: &str, force: bool, if_exists: bool) -> Result<()
     Ok(())
 }
 
-fn start() -> Result<(), String> {
+fn start(ui: &Ui) -> Result<(), String> {
     let project_root = find_project_root()?;
     let docker_compose = find_docker_compose_command()?;
 
-    println!("Starting PostgreSQL...");
+    let _sp = ui.spinner("Starting PostgreSQL...");
     if docker_compose == "docker compose" {
         execute_command("docker", &["compose", "up", "-d", "postgres"], Some(&project_root))?;
     } else {
         execute_command(&docker_compose, &["up", "-d", "postgres"], Some(&project_root))?;
     }
-    println!("PostgreSQL is starting. Use 'odx db logs' to view logs.");
+    ui.success("PostgreSQL is starting. Use 'odx db logs' to view logs.");
     Ok(())
 }
 
-fn stop() -> Result<(), String> {
+fn stop(ui: &Ui) -> Result<(), String> {
     let project_root = find_project_root()?;
     let docker_compose = find_docker_compose_command()?;
 
-    println!("Stopping PostgreSQL...");
+    let _sp = ui.spinner("Stopping PostgreSQL...");
     if docker_compose == "docker compose" {
         execute_command("docker", &["compose", "down"], Some(&project_root))?;
     } else {
@@ -125,7 +134,7 @@ fn stop() -> Result<(), String> {
     Ok(())
 }
 
-fn logs() -> Result<(), String> {
+fn logs(_ui: &Ui) -> Result<(), String> {
     let project_root = find_project_root()?;
     let docker_compose = find_docker_compose_command()?;
 
@@ -137,11 +146,11 @@ fn logs() -> Result<(), String> {
     Ok(())
 }
 
-fn ls() -> Result<(), String> {
+fn ls(ui: &Ui) -> Result<(), String> {
     let project_root = find_project_root()?;
     let docker_compose = find_docker_compose_command()?;
 
-    println!("Listing Odoo databases...");
+    ui.heading("Listing Odoo databases...");
 
     // Query PostgreSQL inside the postgres container for databases typically used by Odoo.
     // This avoids executing any Python scripts from the project scripts directory.
@@ -189,11 +198,11 @@ ORDER BY datname;";
     Ok(())
 }
 
-fn psql() -> Result<(), String> {
+fn psql(ui: &Ui) -> Result<(), String> {
     let project_root = find_project_root()?;
     let docker_compose = find_docker_compose_command()?;
 
-    println!("Connecting to PostgreSQL...");
+    ui.info("Connecting to PostgreSQL...");
     if docker_compose == "docker compose" {
         execute_command(
             "docker",

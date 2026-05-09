@@ -1,4 +1,5 @@
 use crate::commands::db::drop_db;
+use crate::ui::Ui;
 use crate::utils::{
     ensure_odoo_conf_local, execute_command_with_env, execute_command_streaming_with_env,
     find_project_root, find_python_command, ensure_venv, StreamSource,
@@ -14,6 +15,7 @@ use std::sync::{
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub fn execute(
+    ui: &Ui,
     tags: &[String],
     heartbeat_seconds: u64,
     log_file: Option<&str>,
@@ -42,8 +44,9 @@ pub fn execute(
         .as_secs();
     let db_name = format!("test_odoo_{}", timestamp);
 
-    println!("Creating temporary database: {}", db_name);
-    println!("Found {} modules to install", modules.len());
+    ui.heading("Running tests");
+    ui.info(format!("Creating temporary database: {}", db_name));
+    ui.info(format!("Found {} modules to install", modules.len()));
 
     let odoo_bin = project_root.join("src/odoo/odoo-bin");
     if !odoo_bin.exists() {
@@ -58,26 +61,30 @@ pub fn execute(
     let (wkhtml_path, wkhtml_dir) = detect_wkhtmltopdf()?;
     let path_env = build_path_env(&wkhtml_dir)?;
     let envs = [("PATH", path_env.as_str())];
-    println!("wkhtmltopdf: {}", wkhtml_path);
+    ui.info(format!("wkhtmltopdf: {}", wkhtml_path));
 
     // Always attempt to drop the temporary database.
     let dropped = Arc::new(AtomicBool::new(false));
     let cleanup_db = {
         let db_name = db_name.clone();
         let dropped = dropped.clone();
+        let ui = ui.clone();
         move || {
             if dropped.swap(true, Ordering::SeqCst) {
                 return;
             }
-            eprintln!("Step 4: Cleaning up temporary database...");
-            if let Err(drop_err) = drop_db(&db_name, true, true) {
-                eprintln!("Warning: Failed to drop temporary database {}: {}", db_name, drop_err);
-                eprintln!(
+            ui.warn("Step 4: Cleaning up temporary database...");
+            if let Err(drop_err) = drop_db(&ui, &db_name, true, true) {
+                ui.warn(format!(
+                    "Failed to drop temporary database {}: {}",
+                    db_name, drop_err
+                ));
+                ui.info(format!(
                     "You may need to manually drop it: odx db drop --force --if-exists {}",
                     db_name
-                );
+                ));
             } else {
-                eprintln!("Temporary database {} dropped successfully", db_name);
+                ui.success(format!("Temporary database {} dropped", db_name));
             }
         }
     };

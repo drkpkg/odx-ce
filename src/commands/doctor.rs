@@ -2,101 +2,107 @@ use crate::utils::{
     check_command_exists, check_python_version, check_system_package, detect_odoo_version,
     detect_os, find_project_root, get_command_version,
 };
+use crate::ui::Ui;
 use std::fs;
 use std::path::Path;
 
-pub fn execute() -> Result<(), String> {
+pub fn execute(ui: &Ui) -> Result<(), String> {
     let os = detect_os();
 
-    println!("Odoo Framework - System Requirements Check");
-    println!("===========================================\n");
-    println!("Operating System: {}", format_os_name(os));
-    println!();
+    ui.heading("Odoo Framework - System Requirements Check");
+    ui.info("===========================================");
+    ui.info("");
+    ui.info(format!("Operating System: {}", format_os_name(os)));
+    ui.info("");
 
     let mut all_ok = true;
 
-    println!("Common Dependencies:");
-    println!("--------------------");
+    ui.heading("Common Dependencies:");
+    ui.info("--------------------");
 
-    all_ok &= check_python()?;
-    all_ok &= check_git()?;
-    all_ok &= check_docker()?;
+    all_ok &= check_python(ui)?;
+    all_ok &= check_git(ui)?;
+    all_ok &= check_docker(ui)?;
 
-    println!();
+    ui.info("");
 
-    println!("System Dependencies ({})", format_os_name(os));
-    println!("{}", "-".repeat(30));
+    ui.heading(format!("System Dependencies ({})", format_os_name(os)));
+    ui.info("-".repeat(30));
     match os {
-        "linux" => all_ok &= check_linux_dependencies()?,
-        "windows" => all_ok &= check_windows_dependencies()?,
-        "macos" => all_ok &= check_macos_dependencies()?,
+        "linux" => all_ok &= check_linux_dependencies(ui)?,
+        "windows" => all_ok &= check_windows_dependencies(ui)?,
+        "macos" => all_ok &= check_macos_dependencies(ui)?,
         _ => {
-            println!("  OS-specific checks not available for this platform");
+            ui.warn("OS-specific checks not available for this platform");
         }
     }
 
-    println!();
+    ui.info("");
 
     if let Ok(project_root) = find_project_root() {
-        println!("Project Python Dependencies:");
-        println!("---------------------------");
-        check_python_dependencies(&project_root)?;
-        println!();
+        ui.heading("Project Python Dependencies:");
+        ui.info("---------------------------");
+        check_python_dependencies(ui, &project_root)?;
+        ui.info("");
 
-        println!("Odoo in project:");
-        println!("----------------");
-        check_odoo_in_project(&project_root)?;
-        println!();
+        ui.heading("Odoo in project:");
+        ui.info("----------------");
+        check_odoo_in_project(ui, &project_root)?;
+        ui.info("");
     }
 
-    println!("{}", "=".repeat(50));
+    ui.info("=".repeat(50));
     if all_ok {
-        println!("✓ All requirements met");
+        ui.success("All requirements met");
     } else {
-        println!("  Some requirements are missing. Please install them before proceeding.");
+        ui.warn("Some requirements are missing. Please install them before proceeding.");
     }
 
     Ok(())
 }
 
-fn check_python() -> Result<bool, String> {
+fn check_python(ui: &Ui) -> Result<bool, String> {
     match check_python_version("3.10") {
         Ok((version, path)) => {
-            println!("✓ Python {} ({})", version, path);
+            ui.check(true, "Python", Some(&format!("{} ({})", version, path)));
             Ok(true)
         }
         Err(e) => {
-            println!("  {}", e);
+            ui.check(false, "Python", Some(&e));
             Ok(false)
         }
     }
 }
 
-fn check_git() -> Result<bool, String> {
+fn check_git(ui: &Ui) -> Result<bool, String> {
     match check_command_exists("git") {
         Ok(path) => {
             match get_command_version("git") {
                 Ok(version) => {
-                    println!(
-                        "✓ Git {} ({})",
-                        version.lines().next().unwrap_or("unknown"),
-                        path
+                    ui.check(
+                        true,
+                        "Git",
+                        Some(&format!(
+                            "{} ({})",
+                            version.lines().next().unwrap_or("unknown"),
+                            path
+                        )),
                     );
                 }
                 Err(_) => {
-                    println!("✓ Git installed ({})", path);
+                    ui.check(true, "Git", Some(&format!("installed ({})", path)));
                 }
             }
             Ok(true)
         }
         Err(e) => {
-            println!("  {}", e);
+            ui.check(false, "Git", Some(&e));
             Ok(false)
         }
     }
 }
 
-fn check_docker() -> Result<bool, String> {
+fn check_docker(ui: &Ui) -> Result<bool, String> {
     let mut docker_ok = false;
     let mut compose_ok = false;
 
@@ -105,16 +111,16 @@ fn check_docker() -> Result<bool, String> {
             match get_command_version("docker") {
                 Ok(version) => {
                     let ver_line = version.lines().next().unwrap_or("unknown");
-                    println!("✓ Docker {} ({})", ver_line, path);
+                    ui.check(true, "Docker", Some(&format!("{} ({})", ver_line, path)));
                 }
                 Err(_) => {
-                    println!("✓ Docker installed ({})", path);
+                    ui.check(true, "Docker", Some(&format!("installed ({})", path)));
                 }
             }
             docker_ok = true;
         }
         Err(_) => {
-            println!("  Docker not found (optional, for database operations)");
+            ui.warn("Docker not found (optional, for database operations)");
         }
     }
 
@@ -131,25 +137,29 @@ fn check_docker() -> Result<bool, String> {
             "docker-compose"
         }) {
             Ok(version) => {
-                println!(
-                    "✓ Docker Compose {} ({})",
-                    version.lines().next().unwrap_or("unknown"),
-                    compose_cmd
+                ui.check(
+                    true,
+                    "Docker Compose",
+                    Some(&format!(
+                        "{} ({})",
+                        version.lines().next().unwrap_or("unknown"),
+                        compose_cmd
+                    )),
                 );
             }
             Err(_) => {
-                println!("✓ Docker Compose installed ({})", compose_cmd);
+                ui.check(true, "Docker Compose", Some(&format!("installed ({})", compose_cmd)));
             }
         }
         compose_ok = true;
     } else {
-        println!("  Docker Compose not found (optional, for database operations)");
+        ui.warn("Docker Compose not found (optional, for database operations)");
     }
 
     Ok(docker_ok && compose_ok)
 }
 
-fn check_linux_dependencies() -> Result<bool, String> {
+fn check_linux_dependencies(ui: &Ui) -> Result<bool, String> {
     let mut all_ok = true;
 
     let common_packages = vec!["build-essential", "python3-dev", "python3-pip"];
@@ -164,64 +174,69 @@ fn check_linux_dependencies() -> Result<bool, String> {
         ("libffi-dev", "FFI libraries (for cryptography)"),
     ];
 
-    println!("Checking common packages...");
+    ui.info("Checking common packages...");
     for package in common_packages {
         if check_system_package(package) {
-            println!("  ✓ {}", package);
+            ui.check(true, package, None);
         } else {
-            println!("  {} (recommended)", package);
+            ui.check(false, package, Some("(recommended)"));
             all_ok = false;
         }
     }
 
-    println!("\nChecking optional packages...");
+    ui.info("");
+    ui.info("Checking optional packages...");
     for (package, description) in optional_packages {
         if check_system_package(package) {
-            println!("  ✓ {} - {}", package, description);
+            ui.check(true, package, Some(&format!("- {}", description)));
         } else {
-            println!(
-                "  {} - {} (may be needed for some Python packages)",
+            ui.warn(format!(
+                "{} - {} (may be needed for some Python packages)",
                 package, description
-            );
+            ));
         }
     }
 
     Ok(all_ok)
 }
 
-fn check_windows_dependencies() -> Result<bool, String> {
-    println!("Windows-specific checks:");
-    println!("  Visual C++ Build Tools may be required for some Python packages");
-    println!("  WSL2 is recommended for better compatibility");
-    println!("  PostgreSQL client libraries are optional");
+fn check_windows_dependencies(ui: &Ui) -> Result<bool, String> {
+    ui.heading("Windows-specific checks:");
+    ui.info("Visual C++ Build Tools may be required for some Python packages");
+    ui.info("WSL2 is recommended for better compatibility");
+    ui.info("PostgreSQL client libraries are optional");
     Ok(true)
 }
 
-fn check_macos_dependencies() -> Result<bool, String> {
-    println!("macOS-specific checks:");
+fn check_macos_dependencies(ui: &Ui) -> Result<bool, String> {
+    ui.heading("macOS-specific checks:");
 
     if which::which("brew").is_ok() {
-        println!("  Homebrew installed");
+        ui.check(true, "Homebrew", Some("installed"));
     } else {
-        println!("  Homebrew not found (recommended for package management)");
+        ui.check(false, "Homebrew", Some("not found (recommended for package management)"));
     }
 
     if Path::new("/Library/Developer/CommandLineTools").exists() {
-        println!("  Xcode Command Line Tools installed");
+        ui.check(true, "Xcode Command Line Tools", Some("installed"));
     } else {
-        println!("  Xcode Command Line Tools not found (run: xcode-select --install)");
+        ui.check(
+            false,
+            "Xcode Command Line Tools",
+            Some("not found (run: xcode-select --install)"),
+        );
     }
 
-    println!("  Common packages: postgresql, python3-dev");
+    ui.info("Common packages: postgresql, python3-dev");
 
     Ok(true)
 }
 
-fn check_python_dependencies(project_root: &Path) -> Result<(), String> {
+fn check_python_dependencies(ui: &Ui, project_root: &Path) -> Result<(), String> {
     let requirements_file = project_root.join("src/odoo/requirements.txt");
 
     if !requirements_file.exists() {
-        println!("  requirements.txt not found (project may not be initialized)");
+        ui.warn("requirements.txt not found (project may not be initialized)");
         return Ok(());
     }
 
@@ -250,28 +265,28 @@ fn check_python_dependencies(project_root: &Path) -> Result<(), String> {
     }
 
     if packages.is_empty() {
-        println!("  No Python packages found in requirements.txt");
+        ui.warn("No Python packages found in requirements.txt");
         return Ok(());
     }
 
-    println!(
+    ui.info(format!(
         "Found {} Python packages in requirements.txt",
         packages.len()
-    );
-    println!("(Install with: odx install)");
+    ));
+    ui.info("(Install with: odx install)");
 
     Ok(())
 }
 
-fn check_odoo_in_project(project_root: &Path) -> Result<(), String> {
+fn check_odoo_in_project(ui: &Ui, project_root: &Path) -> Result<(), String> {
     let odoo_path = project_root.join("src/odoo");
     if !odoo_path.exists() {
-        println!("  src/odoo not found (create a project with 'odx new')");
+        ui.warn("src/odoo not found (create a project with 'odx new')");
         return Ok(());
     }
     match detect_odoo_version(project_root) {
-        Ok(version) => println!("  Odoo version: {}", version),
-        Err(e) => println!("  {}", e),
+        Ok(version) => ui.info(format!("Odoo version: {}", version)),
+        Err(e) => ui.warn(e),
     }
     Ok(())
 }

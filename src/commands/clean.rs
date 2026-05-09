@@ -1,18 +1,19 @@
 use crate::utils::find_project_root;
+use crate::ui::Ui;
 use std::fs;
 use std::path::Path;
 
-pub fn execute() -> Result<(), String> {
+pub fn execute(ui: &Ui) -> Result<(), String> {
     let project_root = find_project_root()?;
 
-    println!("Cleaning temporary files...");
+    ui.heading("Cleaning temporary files...");
 
     remove_dir_all_matches(&project_root, "__pycache__")?;
     remove_file_matches(&project_root, "*.pyc")?;
     remove_file_matches(&project_root, "*.pyo")?;
     remove_file_matches(&project_root, "*.log")?;
 
-    println!("Clean completed.");
+    ui.success("Clean completed.");
     Ok(())
 }
 
