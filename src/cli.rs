@@ -99,10 +99,10 @@ pub enum Commands {
         /// Emit a heartbeat line if no output is produced for N seconds (0 disables)
         #[arg(long, default_value_t = 60)]
         heartbeat_seconds: u64,
-        /// Write full output to a log file (defaults to .testing/logs/odx-test-<db>.log)
+        /// Override combined log path (default: .testing/sessions/<run_id>/combined.log)
         #[arg(long)]
         log_file: Option<String>,
-        /// Disable log file writing
+        /// Disable all .testing session artifacts (logs, report.json)
         #[arg(long, default_value_t = false)]
         no_log_file: bool,
         /// Odoo log level for the test run (e.g. info, warn, error, debug)

@@ -5,8 +5,10 @@ use crate::utils::{
     find_project_root, find_python_command, ensure_venv, StreamSource,
 };
 use regex::Regex;
+use serde::Serialize;
 use std::collections::{BTreeSet, HashMap};
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -43,6 +45,7 @@ pub fn execute(
         .unwrap()
         .as_secs();
     let db_name = format!("test_odoo_{}", timestamp);
+    let run_id = timestamp.to_string();
 
     ui.heading("Running tests");
     ui.info(format!("Creating temporary database: {}", db_name));
@@ -163,7 +166,15 @@ pub fn execute(
     // Step 3: Run tests
     println!("Step 3: Running tests...");
     let tags_to_run = normalize_specs(tags);
-    let log_path = resolve_log_path(&project_root, &db_name, log_file, no_log_file)?;
+    let session = resolve_test_session(
+        &project_root,
+        &run_id,
+        &db_name,
+        &tags_to_run,
+        &modules,
+        log_file,
+        no_log_file,
+    )?;
 
     let hb = if heartbeat_seconds == 0 {
         None
@@ -173,6 +184,7 @@ pub fn execute(
 
     let mut runs: Vec<TagRunResult> = Vec::new();
     let mut warnings: BTreeSet<String> = BTreeSet::new();
+    let mut run_index: usize = 0;
 
     // Discovery (always): find test methods under each module tests/ tree.
     // Hybrid execution: per-method for small classes, per-class otherwise.
@@ -240,7 +252,8 @@ pub fn execute(
                                     &effective_spec,
                                     odoo_log_level,
                                     hb,
-                                    log_path.as_deref(),
+                                    session.as_ref(),
+                                    &mut run_index,
                                     &mut warnings,
                                     &mut runs,
                                     heartbeat_seconds,
@@ -299,7 +312,8 @@ pub fn execute(
                             &selector,
                             odoo_log_level,
                             hb,
-                            log_path.as_deref(),
+                            session.as_ref(),
+                            &mut run_index,
                             &mut warnings,
                             &mut runs,
                             heartbeat_seconds,
@@ -317,7 +331,8 @@ pub fn execute(
                         &selector,
                         odoo_log_level,
                         hb,
-                        log_path.as_deref(),
+                        session.as_ref(),
+                        &mut run_index,
                         &mut warnings,
                         &mut runs,
                         heartbeat_seconds,
@@ -327,7 +342,11 @@ pub fn execute(
         }
     }
 
-    print_summary(&runs, &warnings, log_path.as_deref());
+    if let Some(ref s) = session {
+        finalize_test_session(s, &runs, &warnings)?;
+    }
+
+    print_summary(&runs, &warnings, session.as_ref());
 
     cleanup_db();
 
@@ -348,7 +367,8 @@ fn run_one_selector(
     selector: &str,
     odoo_log_level: &str,
     hb: Option<Duration>,
-    log_path: Option<&Path>,
+    session: Option<&TestSession>,
+    run_index: &mut usize,
     warnings: &mut BTreeSet<String>,
     runs: &mut Vec<TagRunResult>,
     heartbeat_seconds: u64,
@@ -363,6 +383,39 @@ fn run_one_selector(
             "===== Still running tests: {} (no output for {}s) =====",
             selector, heartbeat_seconds
         )
+    };
+
+    let (combined_log, run_log_rel, mut run_log_file) = match session {
+        Some(s) => {
+            let filename = sanitize_selector_filename(*run_index, selector);
+            *run_index += 1;
+            let run_log_path = s.runs_dir.join(&filename);
+            let rel = format!("runs/{}", filename);
+            if let Some(parent) = run_log_path.parent() {
+                let _ = fs::create_dir_all(parent);
+            }
+            let mut f = match fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .open(&run_log_path)
+            {
+                Ok(file) => Some(file),
+                Err(e) => {
+                    eprintln!("Warning: failed to open run log {}: {}", run_log_path.display(), e);
+                    None
+                }
+            };
+            if let Some(file) = f.as_mut() {
+                let _ = writeln!(file, "===== selector: {} =====", selector);
+            }
+            let _ = append_session_line(
+                &s.combined_log,
+                &format!("===== run: {} =====", selector),
+            );
+            (Some(s.combined_log.as_path()), Some(rel), f)
+        }
+        None => (None, None, None),
     };
 
     let log_level_arg = format!("--log-level={}", odoo_log_level);
@@ -383,17 +436,17 @@ fn run_one_selector(
         &args,
         Some(project_root),
         envs,
-        |src, line| match src {
-            StreamSource::Stdout => {
-                println!("{}", line);
-                parser.ingest(line);
+        |src, line| {
+            match src {
+                StreamSource::Stdout => println!("{}", line),
+                StreamSource::Stderr => eprintln!("{}", line),
             }
-            StreamSource::Stderr => {
-                eprintln!("{}", line);
-                parser.ingest(line);
+            parser.ingest(line);
+            if let Some(file) = run_log_file.as_mut() {
+                let _ = writeln!(file, "{}", line);
             }
         },
-        log_path,
+        combined_log,
         hb,
         &heartbeat_msg,
     );
@@ -404,15 +457,39 @@ fn run_one_selector(
         }
     }
 
+    if let Some(s) = session {
+        if !parser.warnings.is_empty() {
+            let _ = append_session_line(&s.warnings_log, &format!("=== {} ===", selector));
+            for w in &parser.warnings {
+                let _ = append_session_line(&s.warnings_log, w);
+            }
+            let _ = append_session_line(&s.warnings_log, "");
+        }
+    }
+
+    parser.flush_failure_block();
+    let log_file = run_log_rel.unwrap_or_default();
     match result {
         Ok(_) => {
             println!("===== Test passed: {} =====", selector);
-            runs.push(TagRunResult::from_parser(selector.to_string(), true, &parser));
+            runs.push(TagRunResult::from_parser(
+                selector.to_string(),
+                true,
+                None,
+                log_file,
+                &parser,
+            ));
         }
         Err(err) => {
             eprintln!("===== Test failed: {} =====", selector);
             eprintln!("{}", err);
-            runs.push(TagRunResult::from_parser(selector.to_string(), false, &parser));
+            runs.push(TagRunResult::from_parser(
+                selector.to_string(),
+                false,
+                Some(err),
+                log_file,
+                &parser,
+            ));
         }
     }
 }
@@ -725,75 +802,337 @@ fn normalize_specs(raw: &[String]) -> Vec<String> {
     out
 }
 
-fn resolve_log_path(
+#[derive(Debug, Clone)]
+struct TestSession {
+    dir: PathBuf,
+    run_id: String,
+    db_name: String,
+    combined_log: PathBuf,
+    warnings_log: PathBuf,
+    runs_dir: PathBuf,
+}
+
+#[derive(Debug, Serialize)]
+struct SessionMeta {
+    run_id: String,
+    db_name: String,
+    tags: Vec<String>,
+    modules: Vec<String>,
+    started_at: u64,
+    finished_at: Option<u64>,
+    total_runs: usize,
+    passed: usize,
+    failed: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct TestReport {
+    session: SessionMeta,
+    runs: Vec<TagRunResult>,
+    warnings_unique: usize,
+}
+
+fn resolve_test_session(
     project_root: &Path,
+    run_id: &str,
     db_name: &str,
+    tags: &[String],
+    modules: &[String],
     log_file: Option<&str>,
     no_log_file: bool,
-) -> Result<Option<PathBuf>, String> {
+) -> Result<Option<TestSession>, String> {
     if no_log_file {
         return Ok(None);
     }
-    if let Some(p) = log_file {
+
+    let dir = project_root
+        .join(".testing")
+        .join("sessions")
+        .join(run_id);
+    fs::create_dir_all(&dir)
+        .map_err(|e| format!("Failed to create session directory {}: {}", dir.display(), e))?;
+
+    let runs_dir = dir.join("runs");
+    fs::create_dir_all(&runs_dir)
+        .map_err(|e| format!("Failed to create runs directory {}: {}", runs_dir.display(), e))?;
+
+    let combined_log = if let Some(p) = log_file {
         let pb = PathBuf::from(p);
         if pb.is_absolute() {
-            return Ok(Some(pb));
+            pb
+        } else {
+            project_root.join(pb)
         }
-        return Ok(Some(project_root.join(pb)));
+    } else {
+        dir.join("combined.log")
+    };
+
+    if let Some(parent) = combined_log.parent() {
+        fs::create_dir_all(parent).map_err(|e| {
+            format!(
+                "Failed to create combined log directory {}: {}",
+                parent.display(),
+                e
+            )
+        })?;
     }
-    Ok(Some(
-        project_root
-            .join(".testing/logs")
-            .join(format!("odx-test-{}.log", db_name)),
-    ))
+
+    let warnings_log = dir.join("warnings.log");
+    let session = TestSession {
+        dir: dir.clone(),
+        run_id: run_id.to_string(),
+        db_name: db_name.to_string(),
+        combined_log,
+        warnings_log,
+        runs_dir,
+    };
+
+    let meta = SessionMeta {
+        run_id: run_id.to_string(),
+        db_name: db_name.to_string(),
+        tags: tags.to_vec(),
+        modules: modules.to_vec(),
+        started_at: run_id.parse().unwrap_or(0),
+        finished_at: None,
+        total_runs: 0,
+        passed: 0,
+        failed: 0,
+    };
+    let session_path = dir.join("session.json");
+    let json = serde_json::to_string_pretty(&meta)
+        .map_err(|e| format!("Failed to serialize session.json: {}", e))?;
+    fs::write(&session_path, json)
+        .map_err(|e| format!("Failed to write {}: {}", session_path.display(), e))?;
+
+    Ok(Some(session))
+}
+
+fn finalize_test_session(
+    session: &TestSession,
+    runs: &[TagRunResult],
+    warnings: &BTreeSet<String>,
+) -> Result<(), String> {
+    let passed = runs.iter().filter(|r| r.passed).count();
+    let failed = runs.len() - passed;
+    let finished_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    let meta = SessionMeta {
+        run_id: session.run_id.clone(),
+        db_name: session.db_name.clone(),
+        tags: read_session_tags(&session.dir)?,
+        modules: read_session_modules(&session.dir)?,
+        started_at: session.run_id.parse().unwrap_or(0),
+        finished_at: Some(finished_at),
+        total_runs: runs.len(),
+        passed,
+        failed,
+    };
+
+    let session_path = session.dir.join("session.json");
+    let json = serde_json::to_string_pretty(&meta)
+        .map_err(|e| format!("Failed to serialize session.json: {}", e))?;
+    fs::write(&session_path, json)
+        .map_err(|e| format!("Failed to write {}: {}", session_path.display(), e))?;
+
+    let report = TestReport {
+        session: meta,
+        runs: runs.to_vec(),
+        warnings_unique: warnings.len(),
+    };
+    let report_path = session.dir.join("report.json");
+    let report_json = serde_json::to_string_pretty(&report)
+        .map_err(|e| format!("Failed to serialize report.json: {}", e))?;
+    fs::write(&report_path, report_json)
+        .map_err(|e| format!("Failed to write {}: {}", report_path.display(), e))?;
+
+    link_latest_session(session)?;
+    Ok(())
+}
+
+fn read_session_tags(dir: &Path) -> Result<Vec<String>, String> {
+    let path = dir.join("session.json");
+    let content = fs::read_to_string(&path)
+        .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
+    let v: serde_json::Value = serde_json::from_str(&content)
+        .map_err(|e| format!("Failed to parse {}: {}", path.display(), e))?;
+    Ok(v.get("tags")
+        .and_then(|t| t.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
+fn read_session_modules(dir: &Path) -> Result<Vec<String>, String> {
+    let path = dir.join("session.json");
+    let content = fs::read_to_string(&path)
+        .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
+    let v: serde_json::Value = serde_json::from_str(&content)
+        .map_err(|e| format!("Failed to parse {}: {}", path.display(), e))?;
+    Ok(v.get("modules")
+        .and_then(|t| t.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
+fn link_latest_session(session: &TestSession) -> Result<(), String> {
+    let sessions_root = session
+        .dir
+        .parent()
+        .ok_or_else(|| "Invalid session directory".to_string())?;
+    let latest = sessions_root.join("latest");
+    let _ = fs::remove_file(&latest);
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(
+            session.dir.file_name().ok_or("Invalid session dir name")?,
+            &latest,
+        )
+        .map_err(|e| format!("Failed to create latest symlink: {}", e))?;
+    }
+    #[cfg(windows)]
+    {
+        let _ = session;
+        let _ = latest;
+    }
+    Ok(())
+}
+
+fn append_session_line(path: &Path, line: &str) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| {
+            format!(
+                "Failed to create log directory {}: {}",
+                parent.display(),
+                e
+            )
+        })?;
+    }
+    let mut f = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|e| format!("Failed to open {}: {}", path.display(), e))?;
+    writeln!(f, "{}", line).map_err(|e| format!("Failed to write to {}: {}", path.display(), e))?;
+    Ok(())
+}
+
+fn sanitize_selector_filename(index: usize, selector: &str) -> String {
+    let re = Regex::new(r"_+").unwrap();
+    let sanitized: String = selector
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let collapsed = re.replace_all(&sanitized, "_");
+    let trimmed = collapsed.trim_matches('_');
+    let body = if trimmed.is_empty() {
+        "selector"
+    } else if trimmed.len() > 80 {
+        &trimmed[..80]
+    } else {
+        trimmed
+    };
+    format!("{:03}__{}.log", index, body)
 }
 
 #[derive(Debug)]
 struct OutputParser {
     warnings: Vec<String>,
+    failure_blocks: Vec<String>,
     ran_tests: Option<u32>,
     failed: bool,
     skipped: Option<u32>,
     failures: Option<u32>,
     errors: Option<u32>,
+    in_failure_block: bool,
+    current_block: Option<Vec<String>>,
     warning_re: Regex,
     ran_re: Regex,
     failed_re: Regex,
+    fail_block_re: Regex,
+    separator_re: Regex,
 }
 
 impl OutputParser {
     fn new() -> Self {
         Self {
             warnings: Vec::new(),
+            failure_blocks: Vec::new(),
             ran_tests: None,
             failed: false,
             skipped: None,
             failures: None,
             errors: None,
+            in_failure_block: false,
+            current_block: None,
             warning_re: Regex::new(
                 r"\b(DeprecationWarning|PendingDeprecationWarning|FutureWarning|UserWarning|RuntimeWarning|ResourceWarning|SyntaxWarning|ImportWarning)\b",
             )
             .unwrap(),
             ran_re: Regex::new(r"^Ran\s+(\d+)\s+tests?\s+in\s+").unwrap(),
             failed_re: Regex::new(r"^FAILED\s*\((.+)\)\s*$").unwrap(),
+            fail_block_re: Regex::new(r"^(FAIL|ERROR):").unwrap(),
+            separator_re: Regex::new(r"^-{10,}$").unwrap(),
         }
     }
 
     fn ingest(&mut self, line: &str) {
         self.collect_warning(line);
+        self.parse_failure_block(line);
         self.parse_unittest_summary(line);
+    }
+
+    fn flush_failure_block(&mut self) {
+        if let Some(block) = self.current_block.take() {
+            if !block.is_empty() && self.failure_blocks.len() < 20 {
+                self.failure_blocks.push(block.join("\n"));
+            }
+        }
+        self.in_failure_block = false;
+    }
+
+    fn parse_failure_block(&mut self, line: &str) {
+        let trimmed = line.trim();
+        if self.fail_block_re.is_match(trimmed) {
+            self.flush_failure_block();
+            self.in_failure_block = true;
+            self.current_block = Some(vec![line.to_string()]);
+            return;
+        }
+        if self.in_failure_block {
+            if self.separator_re.is_match(trimmed) || self.ran_re.is_match(line) {
+                self.flush_failure_block();
+                return;
+            }
+            if let Some(block) = &mut self.current_block {
+                if block.len() < 100 {
+                    block.push(line.to_string());
+                }
+            }
+        }
     }
 
     fn collect_warning(&mut self, line: &str) {
         if self.warning_re.is_match(line) {
-            if self.warnings.len() < 200 {
-                self.warnings.push(line.to_string());
-            }
+            self.warnings.push(line.to_string());
         }
         if line.contains(" WARNING ") || line.starts_with("WARNING") {
-            if self.warnings.len() < 200 {
-                self.warnings.push(line.to_string());
-            }
+            self.warnings.push(line.to_string());
         }
     }
 
@@ -827,30 +1166,44 @@ impl OutputParser {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 struct TagRunResult {
-    tag: String,
+    selector: String,
     passed: bool,
+    exit_error: Option<String>,
     ran_tests: Option<u32>,
     failures: Option<u32>,
     errors: Option<u32>,
     skipped: Option<u32>,
+    log_file: String,
+    failure_blocks: Vec<String>,
+    warnings: Vec<String>,
 }
 
 impl TagRunResult {
-    fn from_parser(tag: String, passed: bool, parser: &OutputParser) -> Self {
+    fn from_parser(
+        selector: String,
+        passed: bool,
+        exit_error: Option<String>,
+        log_file: String,
+        parser: &OutputParser,
+    ) -> Self {
         Self {
-            tag,
+            selector,
             passed,
+            exit_error,
             ran_tests: parser.ran_tests,
             failures: parser.failures,
             errors: parser.errors,
             skipped: parser.skipped,
+            log_file,
+            failure_blocks: parser.failure_blocks.clone(),
+            warnings: parser.warnings.clone(),
         }
     }
 }
 
-fn print_summary(runs: &[TagRunResult], warnings: &BTreeSet<String>, log_path: Option<&Path>) {
+fn print_summary(runs: &[TagRunResult], warnings: &BTreeSet<String>, session: Option<&TestSession>) {
     let total = runs.len();
     let passed = runs.iter().filter(|r| r.passed).count();
     let failed = total - passed;
@@ -873,14 +1226,24 @@ fn print_summary(runs: &[TagRunResult], warnings: &BTreeSet<String>, log_path: O
         for r in runs.iter().filter(|r| !r.passed) {
             println!(
                 "- {} (ran={:?}, failures={:?}, errors={:?}, skipped={:?})",
-                r.tag, r.ran_tests, r.failures, r.errors, r.skipped
+                r.selector, r.ran_tests, r.failures, r.errors, r.skipped
             );
+            if !r.log_file.is_empty() {
+                println!("  log: {}", r.log_file);
+            }
+            if let Some(err) = &r.exit_error {
+                println!("  exit: {}", err);
+            }
+            if let Some(block) = r.failure_blocks.first() {
+                let preview: String = block.lines().take(8).collect::<Vec<_>>().join("\n");
+                println!("  failure preview:\n{}", indent_lines(&preview, "    "));
+            }
         }
     }
 
     if !warnings.is_empty() {
         println!();
-        println!("Warnings (unique, capped): {}", warnings.len());
+        println!("Warnings (unique, console capped): {}", warnings.len());
         for w in warnings.iter().take(50) {
             println!("- {}", w);
         }
@@ -889,12 +1252,23 @@ fn print_summary(runs: &[TagRunResult], warnings: &BTreeSet<String>, log_path: O
         }
     }
 
-    if let Some(p) = log_path {
+    if let Some(s) = session {
         println!();
-        println!("Log file: {}", p.display());
+        println!("Session artifacts: {}", s.dir.display());
+        println!("  report.json");
+        println!("  combined.log: {}", s.combined_log.display());
+        println!("  warnings.log: {}", s.warnings_log.display());
+        println!("  runs/ ({} files)", runs.iter().filter(|r| !r.log_file.is_empty()).count());
     }
 
     println!("================================================");
+}
+
+fn indent_lines(text: &str, prefix: &str) -> String {
+    text.lines()
+        .map(|l| format!("{}{}", prefix, l))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn find_custom_modules(custom_addons_path: &std::path::Path) -> Result<Vec<String>, String> {
@@ -1009,5 +1383,43 @@ mod tests {
                 method_name: None
             }
         );
+    }
+
+    #[test]
+    fn sanitize_selector_filename_replaces_special_chars() {
+        let name = sanitize_selector_filename(1, "+standard,/mod:Cls.test");
+        assert!(name.starts_with("001__"));
+        assert!(name.ends_with(".log"));
+        assert!(!name.contains('/'));
+        assert!(!name.contains(':'));
+    }
+
+    #[test]
+    fn output_parser_captures_fail_block() {
+        let mut parser = OutputParser::new();
+        parser.ingest("FAIL: test_foo (mod.TestBar)");
+        parser.ingest("Traceback (most recent call last):");
+        parser.ingest("AssertionError: boom");
+        parser.ingest("----------------------------------------------------------------------");
+        parser.ingest("Ran 1 tests in 0.001s");
+        parser.ingest("FAILED (failures=1)");
+        parser.flush_failure_block();
+
+        assert_eq!(parser.failure_blocks.len(), 1);
+        assert!(parser.failure_blocks[0].contains("FAIL: test_foo"));
+        assert!(parser.failure_blocks[0].contains("AssertionError"));
+        assert_eq!(parser.ran_tests, Some(1));
+        assert_eq!(parser.failures, Some(1));
+    }
+
+    #[test]
+    fn output_parser_captures_error_block() {
+        let mut parser = OutputParser::new();
+        parser.ingest("ERROR: test_baz (mod.TestQux)");
+        parser.ingest("Exception: kaboom");
+        parser.flush_failure_block();
+
+        assert_eq!(parser.failure_blocks.len(), 1);
+        assert!(parser.failure_blocks[0].contains("ERROR: test_baz"));
     }
 }
