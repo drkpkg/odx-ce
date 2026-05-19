@@ -1,5 +1,5 @@
-use crate::utils::find_project_root;
 use crate::ui::Ui;
+use crate::utils::find_project_root;
 use std::fs;
 use std::path::Path;
 
@@ -19,10 +19,8 @@ pub fn execute(ui: &Ui) -> Result<(), String> {
 
 fn remove_dir_all_matches(root: &Path, pattern: &str) -> Result<(), String> {
     let mut callback = |path: &Path| {
-        if path.file_name().and_then(|n| n.to_str()) == Some(pattern) {
-            if path.is_dir() {
-                fs::remove_dir_all(path).ok();
-            }
+        if path.file_name().and_then(|n| n.to_str()) == Some(pattern) && path.is_dir() {
+            fs::remove_dir_all(path).ok();
         }
     };
     walk_dir(root, &mut callback);
@@ -30,9 +28,7 @@ fn remove_dir_all_matches(root: &Path, pattern: &str) -> Result<(), String> {
 }
 
 fn remove_file_matches(root: &Path, pattern: &str) -> Result<(), String> {
-    let ext = if pattern.starts_with("*.") {
-        &pattern[2..]
-    } else {
+    let Some(ext) = pattern.strip_prefix("*.") else {
         return Ok(());
     };
 

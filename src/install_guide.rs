@@ -80,10 +80,14 @@ fn build_linux_guide(ctx: &OsContext) -> InstallGuide {
     ];
 
     if family == LinuxFamily::Unknown {
-        notes.push("Could not determine Linux family from os-release; command may be incomplete.".to_string());
+        notes.push(
+            "Could not determine Linux family from os-release; command may be incomplete."
+                .to_string(),
+        );
     }
     if command.is_none() {
-        notes.push("Could not detect a supported package manager (apt-get/dnf/pacman).".to_string());
+        notes
+            .push("Could not detect a supported package manager (apt-get/dnf/pacman).".to_string());
     }
 
     InstallGuide {
@@ -94,7 +98,10 @@ fn build_linux_guide(ctx: &OsContext) -> InstallGuide {
 }
 
 fn build_windows_guide(ctx: &OsContext) -> InstallGuide {
-    let detected = ctx.pretty_name.clone().unwrap_or_else(|| "Windows".to_string());
+    let detected = ctx
+        .pretty_name
+        .clone()
+        .unwrap_or_else(|| "Windows".to_string());
     let mut notes = vec![
         "Recommended for Odoo development: install WSL2 (Ubuntu/Debian/Fedora) and run odx inside WSL.".to_string(),
         "Native Windows support is best-effort; many Python wheels build more reliably on Linux.".to_string(),
@@ -109,7 +116,9 @@ fn build_windows_guide(ctx: &OsContext) -> InstallGuide {
             )
         }
         _ => {
-            notes.push("winget not found. Install Git and Python manually, or use WSL2.".to_string());
+            notes.push(
+                "winget not found. Install Git and Python manually, or use WSL2.".to_string(),
+            );
             None
         }
     };
@@ -131,7 +140,11 @@ pub(crate) fn linux_packages_for(
         .collect()
 }
 
-pub(crate) fn linux_pkg_names(pm: PackageManager, family: LinuxFamily, r: Requirement) -> Vec<String> {
+pub(crate) fn linux_pkg_names(
+    pm: PackageManager,
+    family: LinuxFamily,
+    r: Requirement,
+) -> Vec<String> {
     use LinuxFamily::*;
     use Requirement::*;
 
@@ -191,4 +204,3 @@ pub(crate) fn linux_pkg_names(pm: PackageManager, family: LinuxFamily, r: Requir
         _ => vec![s.to_string()],
     }
 }
-

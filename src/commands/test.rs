@@ -1,8 +1,8 @@
 use crate::commands::db::drop_db;
 use crate::ui::Ui;
 use crate::utils::{
-    ensure_odoo_conf_local, execute_command_with_env, execute_command_streaming_with_env,
-    find_project_root, find_python_command, ensure_venv, StreamSource,
+    ensure_odoo_conf_local, ensure_venv, execute_command_streaming_with_env,
+    execute_command_with_env, find_project_root, find_python_command, StreamSource,
 };
 use regex::Regex;
 use serde::Serialize;
@@ -120,7 +120,7 @@ pub fn execute(
         let mut signals =
             Signals::new([SIGTERM]).map_err(|e| format!("Failed to register SIGTERM: {}", e))?;
         std::thread::spawn(move || {
-            for _ in signals.forever() {
+            if signals.forever().next().is_some() {
                 eprintln!("Received SIGTERM. Attempting to drop temporary database...");
                 cleanup();
                 std::process::exit(143);
@@ -136,9 +136,11 @@ pub fn execute(
         config_file_str.as_str(),
         "-d",
         db_name.as_str(),
-        "--init", "base",
+        "--init",
+        "base",
         "--stop-after-init",
-        "--without-demo", "all",
+        "--without-demo",
+        "all",
     ];
     if let Err(e) = execute_command_with_env(&python, &args, Some(&project_root), &envs) {
         cleanup_db();
@@ -154,9 +156,11 @@ pub fn execute(
         config_file_str.as_str(),
         "-d",
         db_name.as_str(),
-        "--init", modules_str.as_str(),
+        "--init",
+        modules_str.as_str(),
         "--stop-after-init",
-        "--without-demo", "all",
+        "--without-demo",
+        "all",
     ];
     if let Err(e) = execute_command_with_env(&python, &args, Some(&project_root), &envs) {
         cleanup_db();
@@ -235,10 +239,7 @@ pub fn execute(
                         // Ensure the class exists for this module.
                         if let Some(method_names) = classes.get(target_class) {
                             if method_names.iter().any(|m| m == target_method) {
-                                println!(
-                                    "===== Class: {} (1 method) =====",
-                                    target_class
-                                );
+                                println!("===== Class: {} (1 method) =====", target_class);
                                 println!("===== Method 1/1: {} =====", target_method);
 
                                 // Run exactly the effective selector (already class.method-specific).
@@ -300,8 +301,12 @@ pub fn execute(
                             method_names.len(),
                             method_name
                         );
-                        let selector =
-                            inject_selector_method(&effective_spec, module, class_name, method_name);
+                        let selector = inject_selector_method(
+                            &effective_spec,
+                            module,
+                            class_name,
+                            method_name,
+                        );
                         run_one_selector(
                             &python,
                             &project_root,
@@ -357,6 +362,7 @@ pub fn execute(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_one_selector(
     python: &str,
     project_root: &Path,
@@ -402,17 +408,18 @@ fn run_one_selector(
             {
                 Ok(file) => Some(file),
                 Err(e) => {
-                    eprintln!("Warning: failed to open run log {}: {}", run_log_path.display(), e);
+                    eprintln!(
+                        "Warning: failed to open run log {}: {}",
+                        run_log_path.display(),
+                        e
+                    );
                     None
                 }
             };
             if let Some(file) = f.as_mut() {
                 let _ = writeln!(file, "===== selector: {} =====", selector);
             }
-            let _ = append_session_line(
-                &s.combined_log,
-                &format!("===== run: {} =====", selector),
-            );
+            let _ = append_session_line(&s.combined_log, &format!("===== run: {} =====", selector));
             (Some(s.combined_log.as_path()), Some(rel), f)
         }
         None => (None, None, None),
@@ -495,8 +502,10 @@ fn run_one_selector(
 }
 
 fn detect_wkhtmltopdf() -> Result<(String, PathBuf), String> {
-    let p = which::which("wkhtmltopdf")
-        .map_err(|_| "wkhtmltopdf not found on this system. Install wkhtmltopdf 0.12.6.1 (with patched qt).".to_string())?;
+    let p = which::which("wkhtmltopdf").map_err(|_| {
+        "wkhtmltopdf not found on this system. Install wkhtmltopdf 0.12.6.1 (with patched qt)."
+            .to_string()
+    })?;
     let path_str = p.to_string_lossy().to_string();
 
     // Best-effort version check
@@ -660,7 +669,12 @@ fn inject_selector_method(spec: &str, module: &str, class_name: &str, method: &s
     inject_selector(spec, module, Some(class_name), Some(method))
 }
 
-fn inject_selector(spec: &str, module: &str, class_name: Option<&str>, method: Option<&str>) -> String {
+fn inject_selector(
+    spec: &str,
+    module: &str,
+    class_name: Option<&str>,
+    method: Option<&str>,
+) -> String {
     let mut parts: Vec<String> = spec
         .split(',')
         .map(|s| s.trim())
@@ -700,7 +714,10 @@ fn inject_selector(spec: &str, module: &str, class_name: Option<&str>, method: O
     parts.join(",")
 }
 
-fn discover_test_methods(project_root: &Path, modules: &[String]) -> Result<Vec<MethodSpec>, String> {
+fn discover_test_methods(
+    project_root: &Path,
+    modules: &[String],
+) -> Result<Vec<MethodSpec>, String> {
     let custom_addons = project_root.join("custom_addons");
     let mut out = Vec::new();
     for module in modules {
@@ -744,8 +761,13 @@ fn collect_methods_from_tests_dir(
     tests_dir: &Path,
     out: &mut Vec<MethodSpec>,
 ) -> Result<(), String> {
-    let entries = fs::read_dir(tests_dir)
-        .map_err(|e| format!("Failed to read tests directory {}: {}", tests_dir.display(), e))?;
+    let entries = fs::read_dir(tests_dir).map_err(|e| {
+        format!(
+            "Failed to read tests directory {}: {}",
+            tests_dir.display(),
+            e
+        )
+    })?;
     for entry in entries.flatten() {
         let p = entry.path();
         if p.is_dir() {
@@ -755,8 +777,8 @@ fn collect_methods_from_tests_dir(
         if p.extension().and_then(|e| e.to_str()) != Some("py") {
             continue;
         }
-        let content = fs::read_to_string(&p)
-            .map_err(|e| format!("Failed to read {}: {}", p.display(), e))?;
+        let content =
+            fs::read_to_string(&p).map_err(|e| format!("Failed to read {}: {}", p.display(), e))?;
         out.extend(parse_test_methods_from_file(module, &content));
     }
     Ok(())
@@ -845,16 +867,23 @@ fn resolve_test_session(
         return Ok(None);
     }
 
-    let dir = project_root
-        .join(".testing")
-        .join("sessions")
-        .join(run_id);
-    fs::create_dir_all(&dir)
-        .map_err(|e| format!("Failed to create session directory {}: {}", dir.display(), e))?;
+    let dir = project_root.join(".testing").join("sessions").join(run_id);
+    fs::create_dir_all(&dir).map_err(|e| {
+        format!(
+            "Failed to create session directory {}: {}",
+            dir.display(),
+            e
+        )
+    })?;
 
     let runs_dir = dir.join("runs");
-    fs::create_dir_all(&runs_dir)
-        .map_err(|e| format!("Failed to create runs directory {}: {}", runs_dir.display(), e))?;
+    fs::create_dir_all(&runs_dir).map_err(|e| {
+        format!(
+            "Failed to create runs directory {}: {}",
+            runs_dir.display(),
+            e
+        )
+    })?;
 
     let combined_log = if let Some(p) = log_file {
         let pb = PathBuf::from(p);
@@ -1009,13 +1038,8 @@ fn link_latest_session(session: &TestSession) -> Result<(), String> {
 
 fn append_session_line(path: &Path, line: &str) -> Result<(), String> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| {
-            format!(
-                "Failed to create log directory {}: {}",
-                parent.display(),
-                e
-            )
-        })?;
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create log directory {}: {}", parent.display(), e))?;
     }
     let mut f = fs::OpenOptions::new()
         .create(true)
@@ -1030,13 +1054,7 @@ fn sanitize_selector_filename(index: usize, selector: &str) -> String {
     let re = Regex::new(r"_+").unwrap();
     let sanitized: String = selector
         .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() {
-                c
-            } else {
-                '_'
-            }
-        })
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
         .collect();
     let collapsed = re.replace_all(&sanitized, "_");
     let trimmed = collapsed.trim_matches('_');
@@ -1203,7 +1221,11 @@ impl TagRunResult {
     }
 }
 
-fn print_summary(runs: &[TagRunResult], warnings: &BTreeSet<String>, session: Option<&TestSession>) {
+fn print_summary(
+    runs: &[TagRunResult],
+    warnings: &BTreeSet<String>,
+    session: Option<&TestSession>,
+) {
     let total = runs.len();
     let passed = runs.iter().filter(|r| r.passed).count();
     let failed = total - passed;
@@ -1258,7 +1280,10 @@ fn print_summary(runs: &[TagRunResult], warnings: &BTreeSet<String>, session: Op
         println!("  report.json");
         println!("  combined.log: {}", s.combined_log.display());
         println!("  warnings.log: {}", s.warnings_log.display());
-        println!("  runs/ ({} files)", runs.iter().filter(|r| !r.log_file.is_empty()).count());
+        println!(
+            "  runs/ ({} files)",
+            runs.iter().filter(|r| !r.log_file.is_empty()).count()
+        );
     }
 
     println!("================================================");
@@ -1294,15 +1319,15 @@ fn find_custom_modules(custom_addons_path: &std::path::Path) -> Result<Vec<Strin
             } else {
                 // Check subdirectories (for namespace packages)
                 if let Ok(subdirs) = std::fs::read_dir(&path) {
-                    for subentry in subdirs {
-                        if let Ok(subentry) = subentry {
-                            let subpath = subentry.path();
-                            if subpath.is_dir() {
-                                let submanifest = subpath.join("__manifest__.py");
-                                if submanifest.exists() {
-                                    if let Some(module_name) = subpath.file_name().and_then(|n| n.to_str()) {
-                                        modules.push(module_name.to_string());
-                                    }
+                    for subentry in subdirs.flatten() {
+                        let subpath = subentry.path();
+                        if subpath.is_dir() {
+                            let submanifest = subpath.join("__manifest__.py");
+                            if submanifest.exists() {
+                                if let Some(module_name) =
+                                    subpath.file_name().and_then(|n| n.to_str())
+                                {
+                                    modules.push(module_name.to_string());
                                 }
                             }
                         }

@@ -1,5 +1,5 @@
-use crate::utils::{create_venv, execute_command, find_project_root};
 use crate::ui::Ui;
+use crate::utils::{create_venv, execute_command, find_project_root};
 use std::fs;
 use std::path::Path;
 

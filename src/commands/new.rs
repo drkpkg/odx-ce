@@ -1,8 +1,8 @@
+use crate::ui::Ui;
 use crate::utils::{
     check_command_exists, create_project_structure, create_venv, execute_command,
     generate_from_template, resolve_python,
 };
-use crate::ui::Ui;
 use regex::Regex;
 use std::collections::HashMap;
 use std::fs;
@@ -42,15 +42,13 @@ pub fn execute(
 
     out("Setting up Python environment...");
     match resolve_python(python_version) {
-        Ok(python_path) => {
-            match create_venv(&project_path, &python_path) {
-                Ok(_) => out("✓ Virtual environment created"),
-                Err(e) => {
-                    out(&format!("⚠  Failed to create virtual environment: {}", e));
-                    out("   You can create it manually later with: python -m venv .venv");
-                }
+        Ok(python_path) => match create_venv(&project_path, &python_path) {
+            Ok(_) => out("✓ Virtual environment created"),
+            Err(e) => {
+                out(&format!("⚠  Failed to create virtual environment: {}", e));
+                out("   You can create it manually later with: python -m venv .venv");
             }
-        }
+        },
         Err(e) => {
             out(&format!("⚠  {}", e));
             out("   You can create the venv manually later, e.g.: pyenv install 3.11 && python -m venv .venv");
@@ -58,7 +56,10 @@ pub fn execute(
     }
 
     out(&format!("\n{}", "=".repeat(50)));
-    out(&format!("✓ Project '{}' created successfully!", project_name));
+    out(&format!(
+        "✓ Project '{}' created successfully!",
+        project_name
+    ));
     if cd_into {
         out("\nNext steps (you are in the project dir):");
         out("  1. git init       # Initialize Git repository (optional)");
@@ -93,7 +94,7 @@ fn validate_project_name(name: &str) -> Result<(), String> {
     }
 
     // Check for reserved names
-    let reserved = vec!["src", "custom_addons", "external_addons", "docs", "scripts"];
+    let reserved = ["src", "custom_addons", "external_addons", "docs", "scripts"];
     if reserved.contains(&name.to_lowercase().as_str()) {
         return Err(format!(
             "'{}' is a reserved name. Please choose a different name.",
@@ -105,8 +106,7 @@ fn validate_project_name(name: &str) -> Result<(), String> {
 }
 
 fn check_prerequisites(python_version: &str) -> Result<(), String> {
-    resolve_python(python_version)
-        .map_err(|e| format!("Python requirement: {}", e))?;
+    resolve_python(python_version).map_err(|e| format!("Python requirement: {}", e))?;
     check_command_exists("git").map_err(|e| format!("Git requirement: {}", e))?;
     Ok(())
 }

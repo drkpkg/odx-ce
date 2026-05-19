@@ -1,10 +1,10 @@
+use crate::install_guide::{build_install_guide, Requirement};
+use crate::os_context::{LinuxFamily, OsContext, PackageManager, Platform};
+use crate::ui::Ui;
 use crate::utils::{
     check_command_exists, check_python_version, check_system_package, detect_odoo_version,
     detect_os, find_project_root, get_command_version,
 };
-use crate::install_guide::{build_install_guide, Requirement};
-use crate::os_context::{LinuxFamily, OsContext, PackageManager, Platform};
-use crate::ui::Ui;
 use std::fs;
 use std::path::Path;
 
@@ -157,7 +157,11 @@ fn check_docker(ui: &Ui) -> Result<bool, String> {
                 );
             }
             Err(_) => {
-                ui.check(true, "Docker Compose", Some(&format!("installed ({})", compose_cmd)));
+                ui.check(
+                    true,
+                    "Docker Compose",
+                    Some(&format!("installed ({})", compose_cmd)),
+                );
             }
         }
         compose_ok = true;
@@ -195,7 +199,11 @@ fn check_windows_dependencies(ui: &Ui, ctx: &OsContext) -> Result<bool, String> 
     if ctx.package_manager == PackageManager::Winget {
         ui.check(true, "winget", Some("available"));
     } else {
-        ui.check(false, "winget", Some("not found (optional, for easy installs)"));
+        ui.check(
+            false,
+            "winget",
+            Some("not found (optional, for easy installs)"),
+        );
     }
     Ok(true)
 }
@@ -206,7 +214,11 @@ fn check_macos_dependencies(ui: &Ui) -> Result<bool, String> {
     if which::which("brew").is_ok() {
         ui.check(true, "Homebrew", Some("installed"));
     } else {
-        ui.check(false, "Homebrew", Some("not found (recommended for package management)"));
+        ui.check(
+            false,
+            "Homebrew",
+            Some("not found (recommended for package management)"),
+        );
     }
 
     if Path::new("/Library/Developer/CommandLineTools").exists() {
@@ -246,7 +258,7 @@ fn check_python_dependencies(ui: &Ui, project_root: &Path) -> Result<(), String>
             .split_whitespace()
             .next()
             .unwrap_or("")
-            .split(|c| c == '=' || c == '>' || c == '<')
+            .split(['=', '>', '<'])
             .next()
             .unwrap_or("")
             .to_string();
@@ -292,25 +304,14 @@ fn format_os_name(os: &str) -> &str {
     }
 }
 
-fn check_odoo_full_packages(
-    pm: PackageManager,
-    family: LinuxFamily,
-) -> Vec<(String, bool)> {
+fn check_odoo_full_packages(pm: PackageManager, family: LinuxFamily) -> Vec<(String, bool)> {
     use Requirement::*;
 
     // Keep a stable, minimal set for checks (avoid over-reporting).
     // The install guide will include the full list.
     let check_set = [
-        BuildTools,
-        PythonDev,
-        PythonPip,
-        LibPQDev,
-        LibXML2Dev,
-        LibXSLTDev,
-        LibJPEGDev,
-        ZlibDev,
-        OpenSSLDev,
-        LibFFIDev,
+        BuildTools, PythonDev, PythonPip, LibPQDev, LibXML2Dev, LibXSLTDev, LibJPEGDev, ZlibDev,
+        OpenSSLDev, LibFFIDev,
     ];
 
     check_set

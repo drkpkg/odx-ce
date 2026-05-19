@@ -1,8 +1,8 @@
+use crate::ui::Ui;
 use crate::utils::{
     build_addons_path, ensure_odoo_conf_local, ensure_venv, execute_command, find_project_root,
     find_python_command,
 };
-use crate::ui::Ui;
 
 pub fn execute(_ui: &Ui) -> Result<(), String> {
     ensure_venv()?;

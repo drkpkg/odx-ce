@@ -1,6 +1,6 @@
-use clap::Subcommand;
-use crate::utils::{find_project_root, execute_command, find_docker_compose_command};
 use crate::ui::Ui;
+use crate::utils::{execute_command, find_docker_compose_command, find_project_root};
+use clap::Subcommand;
 
 fn validate_db_name(db: &str) -> Result<(), String> {
     if db.is_empty() {
@@ -8,9 +8,7 @@ fn validate_db_name(db: &str) -> Result<(), String> {
     }
     // Conservative validation to avoid passing arbitrary values to subprocesses.
     // Supports typical Odoo DB names like `my_db`, `test_odoo_123`.
-    let ok = db
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '_');
+    let ok = db.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
     if !ok {
         return Err(format!(
             "Invalid database name '{}'. Allowed characters: letters, numbers, underscore (_)",
@@ -113,9 +111,17 @@ fn start(ui: &Ui) -> Result<(), String> {
 
     let _sp = ui.spinner("Starting PostgreSQL...");
     if docker_compose == "docker compose" {
-        execute_command("docker", &["compose", "up", "-d", "postgres"], Some(&project_root))?;
+        execute_command(
+            "docker",
+            &["compose", "up", "-d", "postgres"],
+            Some(&project_root),
+        )?;
     } else {
-        execute_command(&docker_compose, &["up", "-d", "postgres"], Some(&project_root))?;
+        execute_command(
+            &docker_compose,
+            &["up", "-d", "postgres"],
+            Some(&project_root),
+        )?;
     }
     ui.success("PostgreSQL is starting. Use 'odx db logs' to view logs.");
     Ok(())
@@ -139,9 +145,17 @@ fn logs(_ui: &Ui) -> Result<(), String> {
     let docker_compose = find_docker_compose_command()?;
 
     if docker_compose == "docker compose" {
-        execute_command("docker", &["compose", "logs", "-f", "postgres"], Some(&project_root))?;
+        execute_command(
+            "docker",
+            &["compose", "logs", "-f", "postgres"],
+            Some(&project_root),
+        )?;
     } else {
-        execute_command(&docker_compose, &["logs", "-f", "postgres"], Some(&project_root))?;
+        execute_command(
+            &docker_compose,
+            &["logs", "-f", "postgres"],
+            Some(&project_root),
+        )?;
     }
     Ok(())
 }
@@ -162,16 +176,7 @@ ORDER BY datname;";
         execute_command(
             "docker",
             &[
-                "compose",
-                "exec",
-                "-T",
-                "postgres",
-                "psql",
-                "-U",
-                "odoo",
-                "-d",
-                "postgres",
-                "-c",
+                "compose", "exec", "-T", "postgres", "psql", "-U", "odoo", "-d", "postgres", "-c",
                 query,
             ],
             Some(&project_root),
@@ -180,16 +185,7 @@ ORDER BY datname;";
         execute_command(
             &docker_compose,
             &[
-                "exec",
-                "-T",
-                "postgres",
-                "psql",
-                "-U",
-                "odoo",
-                "-d",
-                "postgres",
-                "-c",
-                query,
+                "exec", "-T", "postgres", "psql", "-U", "odoo", "-d", "postgres", "-c", query,
             ],
             Some(&project_root),
         )?;
@@ -206,7 +202,9 @@ fn psql(ui: &Ui) -> Result<(), String> {
     if docker_compose == "docker compose" {
         execute_command(
             "docker",
-            &["compose", "exec", "postgres", "psql", "-U", "odoo", "-d", "postgres"],
+            &[
+                "compose", "exec", "postgres", "psql", "-U", "odoo", "-d", "postgres",
+            ],
             Some(&project_root),
         )?;
     } else {

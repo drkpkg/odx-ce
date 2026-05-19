@@ -1,5 +1,5 @@
-use crate::utils::{detect_odoo_version, execute_command, find_project_root};
 use crate::ui::Ui;
+use crate::utils::{detect_odoo_version, execute_command, find_project_root};
 
 /// Sync Odoo source: pull latest from upstream.
 pub fn execute(ui: &Ui) -> Result<(), String> {

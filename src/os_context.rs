@@ -100,7 +100,12 @@ fn map_linux_family(id: Option<&str>, id_like: &[String]) -> LinuxFamily {
     if id == "ubuntu" || id == "debian" || like_contains("debian") {
         return LinuxFamily::DebianLike;
     }
-    if id == "fedora" || id == "rhel" || id == "centos" || like_contains("fedora") || like_contains("rhel") {
+    if id == "fedora"
+        || id == "rhel"
+        || id == "centos"
+        || like_contains("fedora")
+        || like_contains("rhel")
+    {
         return LinuxFamily::FedoraLike;
     }
     if id == "arch" || id == "manjaro" || like_contains("arch") {
@@ -128,7 +133,11 @@ fn read_os_release_fields() -> (Option<String>, Vec<String>, Option<String>) {
         Some(r) => {
             let id = {
                 let v = r.id().to_string();
-                if v.is_empty() { None } else { Some(v) }
+                if v.is_empty() {
+                    None
+                } else {
+                    Some(v)
+                }
             };
             let id_like: Vec<String> = r
                 .id_like()
@@ -136,11 +145,14 @@ fn read_os_release_fields() -> (Option<String>, Vec<String>, Option<String>) {
                 .unwrap_or_else(Vec::new);
             let pretty = {
                 let v = r.pretty_name().to_string();
-                if v.is_empty() { None } else { Some(v) }
+                if v.is_empty() {
+                    None
+                } else {
+                    Some(v)
+                }
             };
             (id, id_like, pretty)
         }
         None => (None, vec![], None),
     }
 }
-

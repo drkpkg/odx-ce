@@ -30,18 +30,16 @@ pub fn execute(
 
     let targets = resolve_targets(&project_root, module)?;
 
-    let config_str = project_root.join("odoo.conf.local").to_string_lossy().to_string();
+    let config_str = project_root
+        .join("odoo.conf.local")
+        .to_string_lossy()
+        .to_string();
     let odoo_bin_str = odoo_bin.to_string_lossy().to_string();
 
     for (mod_name, mod_path) in targets {
         let i18n_dir = mod_path.join("i18n");
-        fs::create_dir_all(&i18n_dir).map_err(|e| {
-            format!(
-                "Failed to create {}: {}",
-                i18n_dir.display(),
-                e
-            )
-        })?;
+        fs::create_dir_all(&i18n_dir)
+            .map_err(|e| format!("Failed to create {}: {}", i18n_dir.display(), e))?;
 
         let (file_name, lang_for_odoo): (String, &str) = match lang {
             Some(code) => (format!("{}.po", code), code),
@@ -50,13 +48,9 @@ pub fn execute(
 
         let export_path = i18n_dir.join(&file_name);
 
-        let i18n_abs = i18n_dir.canonicalize().map_err(|e| {
-            format!(
-                "Failed to canonicalize {}: {}",
-                i18n_dir.display(),
-                e
-            )
-        })?;
+        let i18n_abs = i18n_dir
+            .canonicalize()
+            .map_err(|e| format!("Failed to canonicalize {}: {}", i18n_dir.display(), e))?;
         let export_abs = i18n_abs.join(&file_name);
         let export_abs_str = export_abs.to_string_lossy().into_owned();
 
@@ -79,20 +73,24 @@ pub fn execute(
 
         execute_command(&python, &args, Some(&project_root))?;
 
-        ui.success(format!("Exported translations to {}", export_path.display()));
+        ui.success(format!(
+            "Exported translations to {}",
+            export_path.display()
+        ));
     }
 
     Ok(())
 }
 
-fn resolve_targets(project_root: &Path, module: Option<&str>) -> Result<Vec<(String, PathBuf)>, String> {
+fn resolve_targets(
+    project_root: &Path,
+    module: Option<&str>,
+) -> Result<Vec<(String, PathBuf)>, String> {
     let pairs = project_addon_modules(project_root)?;
     match module {
         None => {
             if pairs.is_empty() {
-                return Err(
-                    "No addons found under custom_addons.".to_string(),
-                );
+                return Err("No addons found under custom_addons.".to_string());
             }
             Ok(pairs)
         }

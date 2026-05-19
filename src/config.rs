@@ -1,5 +1,5 @@
-use configparser::ini::Ini;
 use crate::utils::find_project_root;
+use configparser::ini::Ini;
 
 #[allow(dead_code)]
 pub struct Config {
@@ -27,15 +27,21 @@ impl Config {
         }
 
         let mut config = Ini::new();
-        config.load(&config_file).map_err(|e| format!("Failed to load config: {}", e))?;
+        config
+            .load(&config_file)
+            .map_err(|e| format!("Failed to load config: {}", e))?;
 
-        let db_host = config.get("options", "db_host")
+        let db_host = config
+            .get("options", "db_host")
             .unwrap_or_else(|| "localhost".to_string());
-        let db_port = config.get("options", "db_port")
+        let db_port = config
+            .get("options", "db_port")
             .unwrap_or_else(|| "5432".to_string());
-        let db_user = config.get("options", "db_user")
+        let db_user = config
+            .get("options", "db_user")
             .unwrap_or_else(|| "odoo".to_string());
-        let db_password = config.get("options", "db_password")
+        let db_password = config
+            .get("options", "db_password")
             .unwrap_or_else(|| "odoo".to_string());
         let db_name = config.get("options", "db_name");
 

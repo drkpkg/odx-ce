@@ -1,11 +1,11 @@
 use regex::Regex;
 use std::collections::HashMap;
 use std::fs;
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::io::{BufRead, BufReader, Write};
-use std::sync::{Arc, Mutex};
 use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -142,6 +142,7 @@ where
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn execute_command_streaming_with_env<F>(
     program: &str,
     args: &[&str],
@@ -177,8 +178,9 @@ where
 
     let log_handle: Option<Arc<Mutex<fs::File>>> = if let Some(path) = log_file {
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|e| format!("Failed to create log directory {}: {}", parent.display(), e))?;
+            fs::create_dir_all(parent).map_err(|e| {
+                format!("Failed to create log directory {}: {}", parent.display(), e)
+            })?;
         }
         let f = fs::OpenOptions::new()
             .create(true)
@@ -197,7 +199,7 @@ where
         let log = log_handle.clone();
         thread::spawn(move || {
             let reader = BufReader::new(stdout);
-            for line in reader.lines().flatten() {
+            for line in reader.lines().map_while(Result::ok) {
                 if let Some(l) = &log {
                     if let Ok(mut f) = l.lock() {
                         let _ = writeln!(f, "{}", line);
@@ -213,7 +215,7 @@ where
         let log = log_handle.clone();
         thread::spawn(move || {
             let reader = BufReader::new(stderr);
-            for line in reader.lines().flatten() {
+            for line in reader.lines().map_while(Result::ok) {
                 if let Some(l) = &log {
                     if let Ok(mut f) = l.lock() {
                         let _ = writeln!(f, "{}", line);
@@ -251,7 +253,9 @@ where
     let status = child
         .wait()
         .map_err(|e| format!("Failed to wait for {}: {}", program, e))?;
-    let code = status.code().unwrap_or_else(|| if status.success() { 0 } else { 1 });
+    let code = status
+        .code()
+        .unwrap_or_else(|| if status.success() { 0 } else { 1 });
 
     if !status.success() {
         return Err(format!(
@@ -311,10 +315,11 @@ pub fn resolve_python(version: &str) -> Result<String, String> {
         if let Some(o) = out {
             if o.status.success() {
                 let path = String::from_utf8_lossy(&o.stdout).trim().to_string();
-                if !path.is_empty() && path.contains("python") {
-                    if check_python_version_matches(&path, want_major, want_minor) {
-                        return Ok(path);
-                    }
+                if !path.is_empty()
+                    && path.contains("python")
+                    && check_python_version_matches(&path, want_major, want_minor)
+                {
+                    return Ok(path);
                 }
             }
         }
@@ -354,7 +359,10 @@ fn parse_major_minor(version: &str) -> Result<(u32, u32), String> {
     let v = version.trim_start_matches("python");
     let parts: Vec<&str> = v.split('.').collect();
     if parts.len() < 2 {
-        return Err(format!("Invalid Python version '{}'. Use e.g. 3.11 or 3.12", version));
+        return Err(format!(
+            "Invalid Python version '{}'. Use e.g. 3.11 or 3.12",
+            version
+        ));
     }
     let major = parts[0]
         .parse::<u32>()
@@ -683,13 +691,16 @@ pub fn external_addons_dirs_with_manifest(project_root: &Path) -> Result<Vec<Pat
         return Ok(Vec::new());
     }
     let mut dirs = addon_root_dirs_under(&external);
-    dirs.sort_by(|a, b| a.cmp(b));
+    dirs.sort();
     Ok(dirs)
 }
 
 /// Recursively collect addon directories (those that contain `__manifest__.py`).
 /// Does not descend into a directory that is itself an addon.
-fn collect_addon_modules_under(root: &Path, acc: &mut Vec<(String, PathBuf)>) -> Result<(), String> {
+fn collect_addon_modules_under(
+    root: &Path,
+    acc: &mut Vec<(String, PathBuf)>,
+) -> Result<(), String> {
     if !root.exists() || !root.is_dir() {
         return Ok(());
     }
@@ -754,7 +765,7 @@ pub fn build_addons_path(project_root: &Path) -> Result<String, String> {
 
     let custom = root.join("custom_addons");
     let mut custom_dirs = addon_root_dirs_under(&custom);
-    custom_dirs.sort_by(|a, b| a.cmp(b));
+    custom_dirs.sort();
     for d in &custom_dirs {
         let abs = d
             .canonicalize()
@@ -872,10 +883,8 @@ mod tests {
 
     #[test]
     fn project_addon_modules_finds_nested_custom_addons() {
-        let tmp = std::env::temp_dir().join(format!(
-            "odx-project-addon-test-{}",
-            std::process::id()
-        ));
+        let tmp =
+            std::env::temp_dir().join(format!("odx-project-addon-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&tmp);
         fs::create_dir_all(tmp.join("custom_addons/org/my_module")).unwrap();
         fs::write(
@@ -893,10 +902,7 @@ mod tests {
 
     #[test]
     fn project_addon_modules_duplicate_name_errors() {
-        let tmp = std::env::temp_dir().join(format!(
-            "odx-dup-addon-test-{}",
-            std::process::id()
-        ));
+        let tmp = std::env::temp_dir().join(format!("odx-dup-addon-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&tmp);
         fs::create_dir_all(tmp.join("custom_addons/org_a/a_dup")).unwrap();
         fs::write(tmp.join("custom_addons/org_a/a_dup/__manifest__.py"), "{}").unwrap();

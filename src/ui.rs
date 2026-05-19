@@ -225,4 +225,3 @@ impl Drop for Spinner {
 pub fn is_broken_pipe(err: &io::Error) -> bool {
     err.kind() == io::ErrorKind::BrokenPipe
 }
-

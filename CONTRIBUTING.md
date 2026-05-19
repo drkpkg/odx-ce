@@ -22,13 +22,18 @@ cargo run -- --help
 Formateo y comprobaciones habituales (recomendado antes de abrir un PR):
 
 ```bash
-cargo fmt
-cargo clippy -- -D warnings
+cargo fmt --all
+cargo clippy --all-targets -- -D warnings
+cargo audit          # cargo install cargo-audit --locked
+cargo deny check     # cargo install cargo-deny --locked
 ```
+
+Instala `cargo-audit` y `cargo-deny` una vez con `cargo install cargo-audit cargo-deny --locked`.
 
 ## Tests
 
-- **CI** (`.github/workflows/ci.yml`) ejecuta `cargo build` y `cargo test --lib`.
+- **CI** (`.github/workflows/ci.yml`) ejecuta `cargo fmt --check`, `cargo clippy`, `cargo deny check`, `cargo build` y `cargo test --lib`.
+- **Auditoría de seguridad** (`.github/workflows/security-audit.yml`) ejecuta `cargo audit` cuando cambian `Cargo.toml` / `Cargo.lock` y diariamente por cron.
 - **Suite completa** (incluye `tests/integration_tests.rs`): clona Odoo desde GitHub y puede tardar y requerir red.
 
 ```bash
@@ -47,6 +52,7 @@ cargo test --lib
 2. Prefiere cambios **acotados** a un objetivo; evita refactors masivos mezclados con la funcionalidad.
 3. Mantén el estilo del código existente (nombres, organización de módulos, mensajes de error al usuario).
 4. Si el cambio afecta comportamiento visible para usuarios, menciónalo en el cuerpo del PR.
+5. Los checks de CI deben pasar: formato, clippy (`-D warnings`), políticas de `deny.toml` y advisories RustSec. Si añades una excepción en `deny.toml`, documenta el motivo en un comentario.
 
 ## Commits (convención opcional)
 

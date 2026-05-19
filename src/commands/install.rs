@@ -1,5 +1,5 @@
-use crate::utils::{find_project_root, ensure_venv, find_python_command, execute_command};
 use crate::ui::Ui;
+use crate::utils::{ensure_venv, execute_command, find_project_root, find_python_command};
 
 pub fn execute(ui: &Ui) -> Result<(), String> {
     ensure_venv()?;
@@ -9,7 +9,10 @@ pub fn execute(ui: &Ui) -> Result<(), String> {
 
     let requirements = project_root.join("src/odoo/requirements.txt");
     if !requirements.exists() {
-        return Err(format!("Requirements file not found: {}", requirements.display()));
+        return Err(format!(
+            "Requirements file not found: {}",
+            requirements.display()
+        ));
     }
 
     let _sp = ui.spinner("Installing Python dependencies (pip)...");
