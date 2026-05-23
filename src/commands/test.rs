@@ -61,7 +61,7 @@ pub fn execute(
     // Preflight wkhtmltopdf to avoid hanging tests.
     let (wkhtml_path, wkhtml_dir) = detect_wkhtmltopdf()?;
     let path_env = build_path_env(&wkhtml_dir)?;
-    let envs = [("PATH", path_env.as_str())];
+    let envs = [("PATH", path_env.as_str()), ("PYTHONUNBUFFERED", "1")];
     ui.info(format!("wkhtmltopdf: {}", wkhtml_path));
 
     // Always attempt to drop the temporary database.
@@ -146,30 +146,8 @@ pub fn execute(
         return Err(e);
     }
 
-    // Step 2: Install all custom_addons modules
-    println!("Step 2: Installing custom_addons modules...");
-    let modules_str = modules.join(",");
-    let args = vec![
-        odoo_bin_str.as_str(),
-        "-c",
-        config_file_str.as_str(),
-        "-d",
-        db_name.as_str(),
-        "--init",
-        modules_str.as_str(),
-        "--no-http",
-        "--stop-after-init",
-        "--without-demo",
-        "all",
-    ];
-    if let Err(e) = execute_command_with_env(&python, &args, Some(&project_root), &envs) {
-        cleanup_db();
-        return Err(e);
-    }
-
-    // Step 3: Run tests
-    println!("Step 3: Running tests...");
     let tags_to_run = normalize_specs(tags);
+    let tags_arg = tags_to_run.join(",");
     let session = resolve_test_session(
         &project_root,
         &run_id,
@@ -190,162 +168,29 @@ pub fn execute(
     let mut warnings: BTreeSet<String> = BTreeSet::new();
     let mut run_index: usize = 0;
 
-    // Discovery (always): find test methods under each module tests/ tree.
-    // Hybrid execution: per-method for small classes, per-class otherwise.
-    let methods = discover_test_methods(&project_root, &modules)?;
-    let class_map = group_methods_by_module_class(&methods);
-
-    for spec in tags_to_run {
-        println!("===== Executing tag: {} =====", spec);
-        let effective_spec = effective_spec_for_execution(&spec);
-        let target = parse_structural_selector(&effective_spec);
-        let module_filter = extract_module_filter(&effective_spec);
-
-        for module in modules.iter() {
-            if let Some(mf) = &module_filter {
-                if mf != module {
-                    continue;
-                }
-            }
-
-            let classes = match class_map.get(module) {
-                Some(c) => c,
-                None => continue,
-            };
-
-            println!("===== Module: {} =====", module);
-
-            let mut class_names: Vec<&String> = classes.keys().collect();
-            class_names.sort();
-
-            // If the user requested a specific class (and optionally method),
-            // only execute that class within this module.
-            if let Some(t) = &target {
-                if let Some(target_module) = &t.module {
-                    if target_module != module {
-                        continue;
-                    }
-                }
-                if let Some(target_class) = &t.class_name {
-                    class_names.retain(|c| c.as_str() == target_class);
-                }
-            }
-
-            // If the user requested a specific method, we will only execute that method
-            // in its class and skip per-method discovery expansion.
-            if let Some(t) = &target {
-                if let Some(target_method) = &t.method_name {
-                    if let Some(target_class) = &t.class_name {
-                        // Ensure the class exists for this module.
-                        if let Some(method_names) = classes.get(target_class) {
-                            if method_names.iter().any(|m| m == target_method) {
-                                println!("===== Class: {} (1 method) =====", target_class);
-                                println!("===== Method 1/1: {} =====", target_method);
-
-                                // Run exactly the effective selector (already class.method-specific).
-                                run_one_selector(
-                                    &python,
-                                    &project_root,
-                                    &envs,
-                                    &odoo_bin_str,
-                                    &config_file_str,
-                                    &db_name,
-                                    &effective_spec,
-                                    odoo_log_level,
-                                    hb,
-                                    session.as_ref(),
-                                    &mut run_index,
-                                    &mut warnings,
-                                    &mut runs,
-                                    heartbeat_seconds,
-                                );
-                            } else {
-                                eprintln!(
-                                    "Warning: requested method {}.{} not discovered in module {}",
-                                    target_class, target_method, module
-                                );
-                            }
-                        } else {
-                            eprintln!(
-                                "Warning: requested class {} not discovered in module {}",
-                                target_class, module
-                            );
-                        }
-                    } else {
-                        // Method without class is not supported by Odoo selector grammar;
-                        // fall back to existing behavior.
-                    }
-                    // Done with this module for this spec.
-                    continue;
-                }
-            }
-
-            for class_name in class_names {
-                let method_names = &classes[class_name];
-                if method_names.is_empty() {
-                    continue;
-                }
-
-                println!(
-                    "===== Class: {} ({} methods) =====",
-                    class_name,
-                    method_names.len()
-                );
-
-                let method_threshold: usize = 20;
-                if method_names.len() <= method_threshold {
-                    for (idx, method_name) in method_names.iter().enumerate() {
-                        println!(
-                            "===== Method {}/{}: {} =====",
-                            idx + 1,
-                            method_names.len(),
-                            method_name
-                        );
-                        let selector = inject_selector_method(
-                            &effective_spec,
-                            module,
-                            class_name,
-                            method_name,
-                        );
-                        run_one_selector(
-                            &python,
-                            &project_root,
-                            &envs,
-                            &odoo_bin_str,
-                            &config_file_str,
-                            &db_name,
-                            &selector,
-                            odoo_log_level,
-                            hb,
-                            session.as_ref(),
-                            &mut run_index,
-                            &mut warnings,
-                            &mut runs,
-                            heartbeat_seconds,
-                        );
-                    }
-                } else {
-                    let selector = inject_selector_class(&effective_spec, module, class_name);
-                    run_one_selector(
-                        &python,
-                        &project_root,
-                        &envs,
-                        &odoo_bin_str,
-                        &config_file_str,
-                        &db_name,
-                        &selector,
-                        odoo_log_level,
-                        hb,
-                        session.as_ref(),
-                        &mut run_index,
-                        &mut warnings,
-                        &mut runs,
-                        heartbeat_seconds,
-                    );
-                }
-            }
-        }
-    }
+    let modules_str = modules.join(",");
+    println!(
+        "Step 2: Installing {} modules and running tests with tags: {} (first log lines may take several minutes)...",
+        modules.len(),
+        tags_arg
+    );
+    run_one_selector(
+        &python,
+        &project_root,
+        &envs,
+        &odoo_bin_str,
+        &config_file_str,
+        &db_name,
+        &modules_str,
+        &tags_arg,
+        odoo_log_level,
+        hb,
+        session.as_ref(),
+        &mut run_index,
+        &mut warnings,
+        &mut runs,
+        heartbeat_seconds,
+    );
 
     if let Some(ref s) = session {
         finalize_test_session(s, &runs, &warnings)?;
@@ -370,7 +215,8 @@ fn run_one_selector(
     odoo_bin_str: &str,
     config_file_str: &str,
     db_name: &str,
-    selector: &str,
+    modules_init: &str,
+    test_tags: &str,
     odoo_log_level: &str,
     hb: Option<Duration>,
     session: Option<&TestSession>,
@@ -379,7 +225,7 @@ fn run_one_selector(
     runs: &mut Vec<TagRunResult>,
     heartbeat_seconds: u64,
 ) {
-    println!("===== Executing: {} =====", selector);
+    println!("===== Executing: {} =====", test_tags);
 
     let mut parser = OutputParser::new();
     let heartbeat_msg = if heartbeat_seconds == 0 {
@@ -387,13 +233,13 @@ fn run_one_selector(
     } else {
         format!(
             "===== Still running tests: {} (no output for {}s) =====",
-            selector, heartbeat_seconds
+            test_tags, heartbeat_seconds
         )
     };
 
     let (combined_log, run_log_rel, mut run_log_file) = match session {
         Some(s) => {
-            let filename = sanitize_selector_filename(*run_index, selector);
+            let filename = sanitize_selector_filename(*run_index, test_tags);
             *run_index += 1;
             let run_log_path = s.runs_dir.join(&filename);
             let rel = format!("runs/{}", filename);
@@ -417,9 +263,10 @@ fn run_one_selector(
                 }
             };
             if let Some(file) = f.as_mut() {
-                let _ = writeln!(file, "===== selector: {} =====", selector);
+                let _ = writeln!(file, "===== selector: {} =====", test_tags);
             }
-            let _ = append_session_line(&s.combined_log, &format!("===== run: {} =====", selector));
+            let _ =
+                append_session_line(&s.combined_log, &format!("===== run: {} =====", test_tags));
             (Some(s.combined_log.as_path()), Some(rel), f)
         }
         None => (None, None, None),
@@ -432,10 +279,15 @@ fn run_one_selector(
         config_file_str,
         "-d",
         db_name,
+        "--init",
+        modules_init,
+        "--test-enable",
         "--test-tags",
-        selector,
+        test_tags,
         "--no-http",
         "--stop-after-init",
+        "--without-demo",
+        "all",
         log_level_arg.as_str(),
     ];
 
@@ -467,7 +319,7 @@ fn run_one_selector(
 
     if let Some(s) = session {
         if !parser.warnings.is_empty() {
-            let _ = append_session_line(&s.warnings_log, &format!("=== {} ===", selector));
+            let _ = append_session_line(&s.warnings_log, &format!("=== {} ===", test_tags));
             for w in &parser.warnings {
                 let _ = append_session_line(&s.warnings_log, w);
             }
@@ -479,9 +331,9 @@ fn run_one_selector(
     let log_file = run_log_rel.unwrap_or_default();
     match result {
         Ok(_) => {
-            println!("===== Test passed: {} =====", selector);
+            println!("===== Test passed: {} =====", test_tags);
             runs.push(TagRunResult::from_parser(
-                selector.to_string(),
+                test_tags.to_string(),
                 true,
                 None,
                 log_file,
@@ -489,10 +341,10 @@ fn run_one_selector(
             ));
         }
         Err(err) => {
-            eprintln!("===== Test failed: {} =====", selector);
+            eprintln!("===== Test failed: {} =====", test_tags);
             eprintln!("{}", err);
             runs.push(TagRunResult::from_parser(
-                selector.to_string(),
+                test_tags.to_string(),
                 false,
                 Some(err),
                 log_file,
@@ -540,275 +392,6 @@ fn build_path_env(extra_dir: &Path) -> Result<String, String> {
     let extra = extra_dir.to_string_lossy();
     // Put wkhtmltopdf directory first to ensure Odoo finds it.
     Ok(format!("{}:{}", extra, current))
-}
-
-#[derive(Debug, Clone)]
-struct MethodSpec {
-    module: String,
-    class_name: String,
-    method_name: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct StructuralSelector {
-    module: Option<String>,
-    class_name: Option<String>,
-    method_name: Option<String>,
-}
-
-fn parse_structural_selector(spec: &str) -> Option<StructuralSelector> {
-    // Odoo selector grammar (relevant subset):
-    //   [-][tag][/module][:class][.method]
-    // We only parse the first structural selector occurrence and ignore tag-only parts.
-    //
-    // Examples:
-    // - "intn,/partner_vat_unique:TestX.test_y" -> module=partner_vat_unique,class=TestX,method=test_y
-    // - "/partner_vat_unique:TestX" -> module=partner_vat_unique,class=TestX
-    // - ":TestX.test_y" -> class=TestX,method=test_y
-    let re = Regex::new(
-        r"(?x)
-        (?:
-            /(?P<module>[A-Za-z0-9_]+)
-        )?
-        (?:
-            :(?P<class>[A-Za-z_][A-Za-z0-9_]*)
-        )?
-        (?:
-            \.(?P<method>[A-Za-z0-9_]+)
-        )?
-        ",
-    )
-    .unwrap();
-
-    for raw_part in spec.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
-        // Skip pure tag-only parts early.
-        if !raw_part.contains('/') && !raw_part.contains(':') && !raw_part.contains('.') {
-            continue;
-        }
-
-        // Strip a leading '-' (exclude spec) because we only care about the structural target.
-        let part = raw_part.strip_prefix('-').unwrap_or(raw_part);
-        if let Some(caps) = re.captures(part) {
-            let module = caps.name("module").map(|m| m.as_str().to_string());
-            let class_name = caps.name("class").map(|m| m.as_str().to_string());
-            let method_name = caps.name("method").map(|m| m.as_str().to_string());
-
-            if module.is_none() && class_name.is_none() && method_name.is_none() {
-                continue;
-            }
-            return Some(StructuralSelector {
-                module,
-                class_name,
-                method_name,
-            });
-        }
-    }
-    None
-}
-
-fn has_any_structural_selector(spec: &str) -> bool {
-    parse_structural_selector(spec).is_some()
-}
-
-fn effective_spec_for_execution(spec: &str) -> String {
-    // If the spec includes a structural selector (module/class/method),
-    // strip tag-only parts like "intn" to avoid pulling unrelated suites.
-    //
-    // Keep any comma parts which themselves contain structural selectors.
-    if !has_any_structural_selector(spec) {
-        return spec.trim().to_string();
-    }
-    let kept: Vec<&str> = spec
-        .split(',')
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-        .filter(|p| p.contains('/') || p.contains(':') || p.contains('.'))
-        .collect();
-
-    if kept.is_empty() {
-        // Defensive: if parsing said structural exists but we filtered all parts out,
-        // fall back to original spec.
-        return spec.trim().to_string();
-    }
-    kept.join(",")
-}
-
-fn group_methods_by_module_class(
-    methods: &[MethodSpec],
-) -> HashMap<String, HashMap<String, Vec<String>>> {
-    let mut out: HashMap<String, HashMap<String, Vec<String>>> = HashMap::new();
-    for m in methods {
-        out.entry(m.module.clone())
-            .or_default()
-            .entry(m.class_name.clone())
-            .or_default()
-            .push(m.method_name.clone());
-    }
-    for (_module, classes) in out.iter_mut() {
-        for (_class, method_names) in classes.iter_mut() {
-            method_names.sort();
-        }
-    }
-    out
-}
-
-fn extract_module_filter(spec: &str) -> Option<String> {
-    let re = Regex::new(r"/([A-Za-z0-9_]+)").unwrap();
-    for part in spec.split(',').map(|s| s.trim()) {
-        if let Some(caps) = re.captures(part) {
-            return Some(caps.get(1).unwrap().as_str().to_string());
-        }
-    }
-    None
-}
-
-fn inject_selector_class(spec: &str, module: &str, class_name: &str) -> String {
-    inject_selector(spec, module, Some(class_name), None)
-}
-
-fn inject_selector_method(spec: &str, module: &str, class_name: &str, method: &str) -> String {
-    inject_selector(spec, module, Some(class_name), Some(method))
-}
-
-fn inject_selector(
-    spec: &str,
-    module: &str,
-    class_name: Option<&str>,
-    method: Option<&str>,
-) -> String {
-    let mut parts: Vec<String> = spec
-        .split(',')
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_string())
-        .collect();
-
-    let mut replaced = false;
-    let module_prefix = format!("/{module}");
-    for p in parts.iter_mut() {
-        if p.starts_with(&module_prefix) && !p.contains(':') && !p.contains('.') {
-            let base = match class_name {
-                Some(cls) => format!("/{module}:{cls}"),
-                None => format!("/{module}"),
-            };
-            let full = match method {
-                Some(m) => format!("{}.{}", base, m),
-                None => base,
-            };
-            *p = full;
-            replaced = true;
-        }
-    }
-
-    if !replaced {
-        let base = match class_name {
-            Some(cls) => format!("/{module}:{cls}"),
-            None => format!("/{module}"),
-        };
-        let full = match method {
-            Some(m) => format!("{}.{}", base, m),
-            None => base,
-        };
-        parts.push(full);
-    }
-
-    parts.join(",")
-}
-
-fn discover_test_methods(
-    project_root: &Path,
-    modules: &[String],
-) -> Result<Vec<MethodSpec>, String> {
-    let custom_addons = project_root.join("custom_addons");
-    let mut out = Vec::new();
-    for module in modules {
-        if let Some(module_root) = find_addon_root_by_name(&custom_addons, module) {
-            let tests_dir = module_root.join("tests");
-            if !tests_dir.exists() {
-                continue;
-            }
-            collect_methods_from_tests_dir(module, &tests_dir, &mut out)?;
-        }
-    }
-    Ok(out)
-}
-
-fn find_addon_root_by_name(root: &Path, addon_name: &str) -> Option<PathBuf> {
-    if !root.exists() {
-        return None;
-    }
-    let entries = fs::read_dir(root).ok()?;
-    for entry in entries.flatten() {
-        let p = entry.path();
-        if !p.is_dir() {
-            continue;
-        }
-        // If this dir is an addon, compare name
-        if p.join("__manifest__.py").exists() {
-            if p.file_name().and_then(|n| n.to_str()) == Some(addon_name) {
-                return Some(p);
-            }
-            continue;
-        }
-        if let Some(found) = find_addon_root_by_name(&p, addon_name) {
-            return Some(found);
-        }
-    }
-    None
-}
-
-fn collect_methods_from_tests_dir(
-    module: &str,
-    tests_dir: &Path,
-    out: &mut Vec<MethodSpec>,
-) -> Result<(), String> {
-    let entries = fs::read_dir(tests_dir).map_err(|e| {
-        format!(
-            "Failed to read tests directory {}: {}",
-            tests_dir.display(),
-            e
-        )
-    })?;
-    for entry in entries.flatten() {
-        let p = entry.path();
-        if p.is_dir() {
-            collect_methods_from_tests_dir(module, &p, out)?;
-            continue;
-        }
-        if p.extension().and_then(|e| e.to_str()) != Some("py") {
-            continue;
-        }
-        let content =
-            fs::read_to_string(&p).map_err(|e| format!("Failed to read {}: {}", p.display(), e))?;
-        out.extend(parse_test_methods_from_file(module, &content));
-    }
-    Ok(())
-}
-
-fn parse_test_methods_from_file(module: &str, content: &str) -> Vec<MethodSpec> {
-    // Heuristic parser: find `class X(...):` and `def test_...`
-    // This is intentionally simple and avoids importing Python.
-    let class_re = Regex::new(r"^class\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(").unwrap();
-    let def_re = Regex::new(r"^\s*def\s+(test_[A-Za-z0-9_]+)\s*\(").unwrap();
-
-    let mut current_class: Option<String> = None;
-    let mut results = Vec::new();
-    for line in content.lines() {
-        if let Some(caps) = class_re.captures(line) {
-            current_class = Some(caps.get(1).unwrap().as_str().to_string());
-            continue;
-        }
-        if let Some(caps) = def_re.captures(line) {
-            if let Some(cls) = &current_class {
-                results.push(MethodSpec {
-                    module: module.to_string(),
-                    class_name: cls.to_string(),
-                    method_name: caps.get(1).unwrap().as_str().to_string(),
-                });
-            }
-        }
-    }
-    results
 }
 
 fn normalize_specs(raw: &[String]) -> Vec<String> {
@@ -1346,69 +929,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn effective_spec_keeps_tag_only_specs() {
-        assert_eq!(effective_spec_for_execution("intn"), "intn");
-        assert_eq!(effective_spec_for_execution("a,b,c"), "a,b,c");
-        assert_eq!(effective_spec_for_execution("   intn  "), "intn");
+    fn normalize_specs_defaults_to_standard() {
+        assert_eq!(normalize_specs(&[]), vec!["+standard".to_string()]);
     }
 
     #[test]
-    fn effective_spec_strips_tag_only_parts_when_structural_present() {
-        assert_eq!(
-            effective_spec_for_execution("intn,/partner_vat_unique"),
-            "/partner_vat_unique"
-        );
-        assert_eq!(
-            effective_spec_for_execution("intn,/partner_vat_unique:TestX"),
-            "/partner_vat_unique:TestX"
-        );
-        assert_eq!(
-            effective_spec_for_execution("intn,/partner_vat_unique:TestX.test_y"),
-            "/partner_vat_unique:TestX.test_y"
-        );
-        assert_eq!(
-            effective_spec_for_execution("intn, /partner_vat_unique:TestX.test_y , external"),
-            "/partner_vat_unique:TestX.test_y"
-        );
+    fn normalize_specs_joins_multiple_tags() {
+        let specs = normalize_specs(&["intn".to_string(), "/mod:Test.test_x".to_string()]);
+        assert_eq!(specs, vec!["intn", "/mod:Test.test_x"]);
+        assert_eq!(specs.join(","), "intn,/mod:Test.test_x");
     }
 
     #[test]
-    fn parse_structural_selector_module_class_method() {
-        let s = parse_structural_selector("intn,/partner_vat_unique:TestX.test_y").unwrap();
-        assert_eq!(
-            s,
-            StructuralSelector {
-                module: Some("partner_vat_unique".to_string()),
-                class_name: Some("TestX".to_string()),
-                method_name: Some("test_y".to_string())
-            }
-        );
-    }
-
-    #[test]
-    fn parse_structural_selector_class_method_without_module() {
-        let s = parse_structural_selector(":TestX.test_y").unwrap();
-        assert_eq!(
-            s,
-            StructuralSelector {
-                module: None,
-                class_name: Some("TestX".to_string()),
-                method_name: Some("test_y".to_string())
-            }
-        );
-    }
-
-    #[test]
-    fn parse_structural_selector_module_only() {
-        let s = parse_structural_selector("intn,/partner_vat_unique").unwrap();
-        assert_eq!(
-            s,
-            StructuralSelector {
-                module: Some("partner_vat_unique".to_string()),
-                class_name: None,
-                method_name: None
-            }
-        );
+    fn normalize_specs_preserves_full_selector_with_tag() {
+        let specs = normalize_specs(&["intn,/partner_vat_unique:TestX.test_y".to_string()]);
+        assert_eq!(specs, vec!["intn,/partner_vat_unique:TestX.test_y"]);
+        assert_eq!(specs.join(","), "intn,/partner_vat_unique:TestX.test_y");
     }
 
     #[test]

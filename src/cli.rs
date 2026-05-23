@@ -92,9 +92,9 @@ pub enum Commands {
         lang: Option<String>,
     },
 
-    /// Run tests (creates temporary database, installs custom_addons modules, runs tests, then deletes database)
+    /// Run tests (creates temporary database, installs custom_addons modules with --test-enable, runs filtered tests via --test-tags, then deletes database)
     Test {
-        /// Test tags (comma-separated or space-separated)
+        /// Odoo --test-tags specs (comma-separated or space-separated; passed once to a single odoo-bin run)
         tags: Vec<String>,
         /// Emit a heartbeat line if no output is produced for N seconds (0 disables)
         #[arg(long, default_value_t = 60)]
