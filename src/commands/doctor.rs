@@ -299,7 +299,11 @@ fn check_project_compose(ui: &Ui, project_root: &Path) -> Result<(), String> {
     match compose_path {
         Some(path) => ui.check(true, "compose file", Some(&path.display().to_string())),
         None => {
-            ui.check(false, "compose file", Some("compose.yml or compose.yaml missing"));
+            ui.check(
+                false,
+                "compose file",
+                Some("compose.yml or compose.yaml missing"),
+            );
             return Ok(());
         }
     }
@@ -323,9 +327,7 @@ fn check_project_compose(ui: &Ui, project_root: &Path) -> Result<(), String> {
         match output {
             Ok(output) if output.status.success() => {
                 let services = String::from_utf8_lossy(&output.stdout);
-                let has_postgres = services
-                    .lines()
-                    .any(|line| line.trim() == "postgres");
+                let has_postgres = services.lines().any(|line| line.trim() == "postgres");
                 if has_postgres {
                     ui.check(true, "postgres service", Some("defined in compose file"));
                 } else {
@@ -337,7 +339,9 @@ fn check_project_compose(ui: &Ui, project_root: &Path) -> Result<(), String> {
                 }
             }
             Ok(_) => {
-                ui.warn("Could not validate compose services (run 'docker compose config' manually)");
+                ui.warn(
+                    "Could not validate compose services (run 'docker compose config' manually)",
+                );
             }
             Err(e) => {
                 ui.warn(format!("Could not run docker compose config: {}", e));
