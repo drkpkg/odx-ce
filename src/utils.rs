@@ -9,22 +9,40 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+fn has_compose_file(dir: &Path) -> bool {
+    dir.join("compose.yml").exists() || dir.join("compose.yaml").exists()
+}
+
 pub fn find_project_root() -> Result<PathBuf, String> {
     let mut current =
         std::env::current_dir().map_err(|e| format!("Failed to get current directory: {}", e))?;
 
     loop {
-        let compose_file = current.join("compose.yml");
-        let odoo_bin = current.join("src/odoo/odoo-bin");
-
-        if compose_file.exists() && odoo_bin.exists() {
+        if has_compose_file(&current) {
             return Ok(current);
         }
 
         match current.parent() {
             Some(parent) => current = parent.to_path_buf(),
-            None => return Err("Could not find project root (compose.yml not found)".to_string()),
+            None => {
+                return Err(
+                    "Could not find project root (no compose.yml or compose.yaml in this directory tree)"
+                        .to_string(),
+                );
+            }
         }
+    }
+}
+
+pub fn require_odoo_bin(project_root: &Path) -> Result<PathBuf, String> {
+    let odoo_bin = project_root.join("src/odoo/odoo-bin");
+    if odoo_bin.exists() {
+        Ok(odoo_bin)
+    } else {
+        Err(format!(
+            "Odoo source missing at {}. Run 'odx install' to initialize submodules.",
+            odoo_bin.display()
+        ))
     }
 }
 
@@ -267,15 +285,28 @@ where
     Ok(code)
 }
 
+fn docker_compose_plugin_available() -> bool {
+    Command::new("docker")
+        .args(["compose", "version"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
 pub fn find_docker_compose_command() -> Result<String, String> {
     which::which("docker").map_err(|_| "Docker not found. Please install Docker".to_string())?;
 
-    if which::which("docker").is_ok() && which::which("compose").is_ok() {
+    if docker_compose_plugin_available() {
         Ok("docker compose".to_string())
     } else if which::which("docker-compose").is_ok() {
         Ok("docker-compose".to_string())
     } else {
-        Err("Docker Compose not found. Please install Docker Compose".to_string())
+        Err(
+            "Docker Compose not found. Install the Docker Compose v2 plugin (docker compose) or docker-compose"
+                .to_string(),
+        )
     }
 }
 
@@ -915,6 +946,79 @@ mod tests {
             "unexpected error: {}",
             err
         );
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn find_project_root_succeeds_with_compose_only() {
+        let tmp = std::env::temp_dir().join(format!("odx-root-compose-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        fs::write(tmp.join("compose.yml"), "services: {}\n").unwrap();
+
+        let prev = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&tmp).unwrap();
+        let root = find_project_root();
+        std::env::set_current_dir(prev).unwrap();
+
+        assert_eq!(root.unwrap(), tmp);
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn find_project_root_succeeds_with_compose_yaml() {
+        let tmp = std::env::temp_dir().join(format!("odx-root-yaml-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        fs::write(tmp.join("compose.yaml"), "services: {}\n").unwrap();
+
+        let prev = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&tmp).unwrap();
+        let root = find_project_root();
+        std::env::set_current_dir(prev).unwrap();
+
+        assert_eq!(root.unwrap(), tmp);
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn find_project_root_fails_without_compose() {
+        let tmp = std::env::temp_dir().join(format!("odx-root-none-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+
+        let prev = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&tmp).unwrap();
+        let err = find_project_root().unwrap_err();
+        std::env::set_current_dir(prev).unwrap();
+
+        assert!(err.contains("compose.yml") || err.contains("compose.yaml"));
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn require_odoo_bin_errors_when_missing() {
+        let tmp = std::env::temp_dir().join(format!("odx-odoo-bin-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+
+        let err = require_odoo_bin(&tmp).unwrap_err();
+        assert!(err.contains("odx install"));
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn require_odoo_bin_succeeds_when_present() {
+        let tmp = std::env::temp_dir().join(format!("odx-odoo-bin-ok-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        let bin_dir = tmp.join("src/odoo");
+        fs::create_dir_all(&bin_dir).unwrap();
+        fs::write(bin_dir.join("odoo-bin"), "#!/bin/sh\n").unwrap();
+
+        let path = require_odoo_bin(&tmp).unwrap();
+        assert_eq!(path, bin_dir.join("odoo-bin"));
 
         let _ = fs::remove_dir_all(&tmp);
     }

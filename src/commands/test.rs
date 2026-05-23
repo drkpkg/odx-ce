@@ -2,7 +2,8 @@ use crate::commands::db::drop_db;
 use crate::ui::Ui;
 use crate::utils::{
     ensure_odoo_conf_local, ensure_venv, execute_command_streaming_with_env,
-    execute_command_with_env, find_project_root, find_python_command, StreamSource,
+    execute_command_with_env, find_project_root, find_python_command, require_odoo_bin,
+    StreamSource,
 };
 use regex::Regex;
 use serde::Serialize;
@@ -51,10 +52,7 @@ pub fn execute(
     ui.info(format!("Creating temporary database: {}", db_name));
     ui.info(format!("Found {} modules to install", modules.len()));
 
-    let odoo_bin = project_root.join("src/odoo/odoo-bin");
-    if !odoo_bin.exists() {
-        return Err(format!("odoo-bin not found: {}", odoo_bin.display()));
-    }
+    let odoo_bin = require_odoo_bin(&project_root)?;
 
     let config_file = project_root.join("odoo.conf.local");
     let odoo_bin_str = odoo_bin.to_string_lossy().to_string();
@@ -138,6 +136,7 @@ pub fn execute(
         db_name.as_str(),
         "--init",
         "base",
+        "--no-http",
         "--stop-after-init",
         "--without-demo",
         "all",
@@ -158,6 +157,7 @@ pub fn execute(
         db_name.as_str(),
         "--init",
         modules_str.as_str(),
+        "--no-http",
         "--stop-after-init",
         "--without-demo",
         "all",
@@ -434,6 +434,7 @@ fn run_one_selector(
         db_name,
         "--test-tags",
         selector,
+        "--no-http",
         "--stop-after-init",
         log_level_arg.as_str(),
     ];

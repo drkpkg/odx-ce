@@ -3,10 +3,12 @@ use crate::os_context::{LinuxFamily, OsContext, PackageManager, Platform};
 use crate::ui::Ui;
 use crate::utils::{
     check_command_exists, check_python_version, check_system_package, detect_odoo_version,
-    detect_os, find_project_root, get_command_version,
+    detect_os, find_docker_compose_command, find_project_root, get_command_version,
+    require_odoo_bin,
 };
 use std::fs;
 use std::path::Path;
+use std::process::{Command, Stdio};
 
 pub fn execute(ui: &Ui) -> Result<(), String> {
     let os = detect_os();
@@ -46,6 +48,11 @@ pub fn execute(ui: &Ui) -> Result<(), String> {
     ui.info("");
 
     if let Ok(project_root) = find_project_root() {
+        ui.heading("Project layout:");
+        ui.info("---------------");
+        check_project_compose(ui, &project_root)?;
+        ui.info("");
+
         ui.heading("Project Python Dependencies:");
         ui.info("---------------------------");
         check_python_dependencies(ui, &project_root)?;
@@ -133,40 +140,36 @@ fn check_docker(ui: &Ui) -> Result<bool, String> {
         }
     }
 
-    if which::which("compose").is_ok() || which::which("docker-compose").is_ok() {
-        let compose_cmd = if which::which("compose").is_ok() {
-            "docker compose"
-        } else {
-            "docker-compose"
-        };
+    match find_docker_compose_command() {
+        Ok(compose_cmd) => {
+            let version = if compose_cmd == "docker compose" {
+                Command::new("docker")
+                    .args(["compose", "version"])
+                    .output()
+                    .ok()
+                    .and_then(|o| {
+                        if o.status.success() {
+                            String::from_utf8(o.stdout).ok()
+                        } else {
+                            None
+                        }
+                    })
+            } else {
+                get_command_version("docker-compose").ok()
+            };
 
-        match get_command_version(if compose_cmd == "docker compose" {
-            "compose"
-        } else {
-            "docker-compose"
-        }) {
-            Ok(version) => {
-                ui.check(
-                    true,
-                    "Docker Compose",
-                    Some(&format!(
-                        "{} ({})",
-                        version.lines().next().unwrap_or("unknown"),
-                        compose_cmd
-                    )),
-                );
-            }
-            Err(_) => {
-                ui.check(
-                    true,
-                    "Docker Compose",
-                    Some(&format!("installed ({})", compose_cmd)),
-                );
-            }
+            let detail = version
+                .as_ref()
+                .and_then(|v| v.lines().next())
+                .map(|line| format!("{} ({})", line, compose_cmd))
+                .unwrap_or_else(|| format!("installed ({})", compose_cmd));
+
+            ui.check(true, "Docker Compose", Some(&detail));
+            compose_ok = true;
         }
-        compose_ok = true;
-    } else {
-        ui.warn("Docker Compose not found (optional, for database operations)");
+        Err(e) => {
+            ui.warn(format!("{} (optional, for database operations)", e));
+        }
     }
 
     Ok(docker_ok && compose_ok)
@@ -282,12 +285,84 @@ fn check_python_dependencies(ui: &Ui, project_root: &Path) -> Result<(), String>
     Ok(())
 }
 
+fn check_project_compose(ui: &Ui, project_root: &Path) -> Result<(), String> {
+    let compose_yml = project_root.join("compose.yml");
+    let compose_yaml = project_root.join("compose.yaml");
+    let compose_path = if compose_yml.exists() {
+        Some(compose_yml)
+    } else if compose_yaml.exists() {
+        Some(compose_yaml)
+    } else {
+        None
+    };
+
+    match compose_path {
+        Some(path) => ui.check(true, "compose file", Some(&path.display().to_string())),
+        None => {
+            ui.check(false, "compose file", Some("compose.yml or compose.yaml missing"));
+            return Ok(());
+        }
+    }
+
+    if let Ok(compose_cmd) = find_docker_compose_command() {
+        let output = if compose_cmd == "docker compose" {
+            Command::new("docker")
+                .args(["compose", "config", "--services"])
+                .current_dir(project_root)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .output()
+        } else {
+            Command::new(&compose_cmd)
+                .args(["config", "--services"])
+                .current_dir(project_root)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .output()
+        };
+        match output {
+            Ok(output) if output.status.success() => {
+                let services = String::from_utf8_lossy(&output.stdout);
+                let has_postgres = services
+                    .lines()
+                    .any(|line| line.trim() == "postgres");
+                if has_postgres {
+                    ui.check(true, "postgres service", Some("defined in compose file"));
+                } else {
+                    ui.check(
+                        false,
+                        "postgres service",
+                        Some("not found in compose file (odx db expects service name 'postgres')"),
+                    );
+                }
+            }
+            Ok(_) => {
+                ui.warn("Could not validate compose services (run 'docker compose config' manually)");
+            }
+            Err(e) => {
+                ui.warn(format!("Could not run docker compose config: {}", e));
+            }
+        }
+    }
+
+    Ok(())
+}
+
 fn check_odoo_in_project(ui: &Ui, project_root: &Path) -> Result<(), String> {
     let odoo_path = project_root.join("src/odoo");
     if !odoo_path.exists() {
-        ui.warn("src/odoo not found (create a project with 'odx new')");
+        ui.warn("src/odoo not found (run 'odx install' to initialize submodules)");
         return Ok(());
     }
+
+    match require_odoo_bin(project_root) {
+        Ok(_) => {}
+        Err(e) => {
+            ui.warn(e);
+            return Ok(());
+        }
+    }
+
     match detect_odoo_version(project_root) {
         Ok(version) => ui.info(format!("Odoo version: {}", version)),
         Err(e) => ui.warn(e),

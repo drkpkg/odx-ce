@@ -270,8 +270,15 @@ fn test_doctor_in_project() {
     // Create a minimal project structure if it doesn't exist
     if !test_path.exists() {
         fs::create_dir_all(&test_path).expect("Failed to create test project");
+        fs::write(
+            test_path.join("compose.yml"),
+            "services:\n  postgres:\n    image: postgres:17\n",
+        )
+        .expect("Failed to write compose.yml");
         fs::create_dir_all(test_path.join("src/odoo")).expect("Failed to create odoo dir");
         fs::create_dir_all(test_path.join("src/odoo/odoo")).expect("Failed to create odoo/odoo");
+        fs::write(test_path.join("src/odoo/odoo-bin"), "#!/bin/sh\n")
+            .expect("Failed to write odoo-bin");
 
         // Create minimal __init__.py
         fs::write(
@@ -279,6 +286,12 @@ fn test_doctor_in_project() {
             "version_info = (18, 0)\n",
         )
         .expect("Failed to write __init__.py");
+    } else if !test_path.join("compose.yml").exists() {
+        fs::write(
+            test_path.join("compose.yml"),
+            "services:\n  postgres:\n    image: postgres:17\n",
+        )
+        .expect("Failed to write compose.yml");
     }
 
     let odoo_bin = get_odoo_binary();

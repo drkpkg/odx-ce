@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use crate::ui::Ui;
 use crate::utils::{
     build_addons_path, ensure_odoo_conf_local, ensure_venv, execute_command, find_project_root,
-    find_python_command, project_addon_modules,
+    find_python_command, project_addon_modules, require_odoo_bin,
 };
 
 const TEMPLATE_LANG: &str = "en_US";
@@ -23,10 +23,7 @@ pub fn execute(
     let addons_path = build_addons_path(&project_root)?;
 
     let python = find_python_command()?;
-    let odoo_bin = project_root.join("src/odoo/odoo-bin");
-    if !odoo_bin.exists() {
-        return Err(format!("odoo-bin not found: {}", odoo_bin.display()));
-    }
+    let odoo_bin = require_odoo_bin(&project_root)?;
 
     let targets = resolve_targets(&project_root, module)?;
 

@@ -1,7 +1,7 @@
 use crate::ui::Ui;
 use crate::utils::{
     build_addons_path, ensure_odoo_conf_local, ensure_venv, execute_command, find_project_root,
-    find_python_command,
+    find_python_command, require_odoo_bin,
 };
 
 pub fn execute(_ui: &Ui, database: &str) -> Result<(), String> {
@@ -13,10 +13,7 @@ pub fn execute(_ui: &Ui, database: &str) -> Result<(), String> {
     let addons_path = build_addons_path(&project_root)?;
 
     let python = find_python_command()?;
-    let odoo_bin = project_root.join("src/odoo/odoo-bin");
-    if !odoo_bin.exists() {
-        return Err(format!("odoo-bin not found: {}", odoo_bin.display()));
-    }
+    let odoo_bin = require_odoo_bin(&project_root)?;
 
     let config_file = project_root.join("odoo.conf.local");
     let odoo_bin_str = odoo_bin.to_string_lossy();
