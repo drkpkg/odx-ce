@@ -1,7 +1,7 @@
 use regex::Regex;
 use std::collections::HashMap;
 use std::fs;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
@@ -130,6 +130,29 @@ pub fn execute_command_with_env(
 pub enum StreamSource {
     Stdout,
     Stderr,
+    /// Lines read from Odoo's --logfile (main source during odx test).
+    LogFile,
+}
+
+/// Read appended bytes from `path` since `offset` and return complete new lines.
+pub fn read_new_log_lines(path: &Path, offset: &mut u64) -> Result<Vec<String>, String> {
+    let len = fs::metadata(path)
+        .map_err(|e| format!("Failed to stat log file {}: {}", path.display(), e))?
+        .len();
+    if len <= *offset {
+        return Ok(Vec::new());
+    }
+    let mut file = fs::File::open(path)
+        .map_err(|e| format!("Failed to open log file {}: {}", path.display(), e))?;
+    file.seek(SeekFrom::Start(*offset))
+        .map_err(|e| format!("Failed to seek log file {}: {}", path.display(), e))?;
+    let reader = BufReader::new(file);
+    let mut lines = Vec::new();
+    for line in reader.lines() {
+        lines.push(line.map_err(|e| format!("Failed to read log file {}: {}", path.display(), e))?);
+    }
+    *offset = len;
+    Ok(lines)
 }
 
 /// Execute a command with stdout/stderr streamed line-by-line.
@@ -155,6 +178,7 @@ where
         &[],
         on_line,
         log_file,
+        None,
         heartbeat,
         heartbeat_message,
     )
@@ -168,12 +192,32 @@ pub fn execute_command_streaming_with_env<F>(
     envs: &[(&str, &str)],
     mut on_line: F,
     log_file: Option<&Path>,
+    odoo_log_file: Option<&Path>,
     heartbeat: Option<Duration>,
     heartbeat_message: &str,
 ) -> Result<i32, String>
 where
     F: FnMut(StreamSource, &str),
 {
+    if let Some(path) = odoo_log_file {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|e| {
+                format!(
+                    "Failed to create Odoo log directory {}: {}",
+                    parent.display(),
+                    e
+                )
+            })?;
+        }
+        fs::write(path, b"").map_err(|e| {
+            format!(
+                "Failed to initialize Odoo log file {}: {}",
+                path.display(),
+                e
+            )
+        })?;
+    }
+
     let mut cmd = Command::new(program);
     cmd.args(args);
     if let Some(dir) = working_dir {
@@ -210,6 +254,14 @@ where
         None
     };
 
+    let mirror_line = |log: &Option<Arc<Mutex<fs::File>>>, line: &str| {
+        if let Some(l) = log {
+            if let Ok(mut f) = l.lock() {
+                let _ = writeln!(f, "{}", line);
+            }
+        }
+    };
+
     let (tx, rx) = mpsc::channel::<(StreamSource, String)>();
 
     {
@@ -218,11 +270,7 @@ where
         thread::spawn(move || {
             let reader = BufReader::new(stdout);
             for line in reader.lines().map_while(Result::ok) {
-                if let Some(l) = &log {
-                    if let Ok(mut f) = l.lock() {
-                        let _ = writeln!(f, "{}", line);
-                    }
-                }
+                mirror_line(&log, &line);
                 let _ = tx.send((StreamSource::Stdout, line));
             }
         });
@@ -234,38 +282,70 @@ where
         thread::spawn(move || {
             let reader = BufReader::new(stderr);
             for line in reader.lines().map_while(Result::ok) {
-                if let Some(l) = &log {
-                    if let Ok(mut f) = l.lock() {
-                        let _ = writeln!(f, "{}", line);
-                    }
-                }
+                mirror_line(&log, &line);
                 let _ = tx.send((StreamSource::Stderr, line));
             }
         });
     }
 
     let mut last_output = Instant::now();
-    loop {
-        match heartbeat {
-            Some(hb) => match rx.recv_timeout(Duration::from_millis(250)) {
-                Ok((src, line)) => {
-                    last_output = Instant::now();
-                    on_line(src, &line);
-                }
-                Err(mpsc::RecvTimeoutError::Timeout) => {
-                    if last_output.elapsed() >= hb {
-                        last_output = Instant::now();
-                        on_line(StreamSource::Stdout, heartbeat_message);
-                    }
-                }
-                Err(mpsc::RecvTimeoutError::Disconnected) => break,
-            },
-            None => match rx.recv_timeout(Duration::from_millis(250)) {
-                Ok((src, line)) => on_line(src, &line),
-                Err(mpsc::RecvTimeoutError::Timeout) => {}
-                Err(mpsc::RecvTimeoutError::Disconnected) => break,
-            },
+    let mut odoo_log_offset: u64 = 0;
+    let poll = Duration::from_millis(200);
+
+    let drain_odoo_log = |offset: &mut u64, on_line: &mut F| -> bool {
+        let Some(path) = odoo_log_file else {
+            return false;
+        };
+        if !path.exists() {
+            return false;
         }
+        match read_new_log_lines(path, offset) {
+            Ok(lines) => {
+                if lines.is_empty() {
+                    return false;
+                }
+                for line in lines {
+                    mirror_line(&log_handle, &line);
+                    on_line(StreamSource::LogFile, &line);
+                }
+                true
+            }
+            Err(e) => {
+                on_line(StreamSource::Stderr, &format!("Warning: {}", e));
+                true
+            }
+        }
+    };
+
+    loop {
+        if drain_odoo_log(&mut odoo_log_offset, &mut on_line) {
+            last_output = Instant::now();
+        }
+
+        while let Ok((src, line)) = rx.try_recv() {
+            last_output = Instant::now();
+            on_line(src, &line);
+        }
+
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => {}
+            Err(e) => return Err(format!("Failed to poll {}: {}", program, e)),
+        }
+
+        if let Some(hb) = heartbeat {
+            if last_output.elapsed() >= hb {
+                last_output = Instant::now();
+                on_line(StreamSource::Stdout, heartbeat_message);
+            }
+        }
+
+        thread::sleep(poll);
+    }
+
+    drain_odoo_log(&mut odoo_log_offset, &mut on_line);
+    while let Ok((src, line)) = rx.try_recv() {
+        on_line(src, &line);
     }
 
     let status = child
@@ -1010,6 +1090,27 @@ mod tests {
     }
 
     #[test]
+    fn read_new_log_lines_returns_appended_content() {
+        let tmp = std::env::temp_dir().join(format!("odx-log-tail-{}", std::process::id()));
+        fs::write(&tmp, b"line1\n").unwrap();
+        let mut offset = 0;
+        let lines = read_new_log_lines(&tmp, &mut offset).unwrap();
+        assert_eq!(lines, vec!["line1".to_string()]);
+        fs::OpenOptions::new().append(true).open(&tmp).unwrap();
+        fs::write(&tmp, b"line1\nline2\n").unwrap();
+        // rewrite full file for simple test
+        fs::write(&tmp, b"line1\nline2\n").unwrap();
+        offset = 0;
+        let all = read_new_log_lines(&tmp, &mut offset).unwrap();
+        assert_eq!(all, vec!["line1", "line2"]);
+        offset = 0;
+        fs::write(&tmp, b"line1\nline2\nline3\n").unwrap();
+        let _ = read_new_log_lines(&tmp, &mut offset).unwrap();
+        let more = read_new_log_lines(&tmp, &mut offset).unwrap();
+        assert!(more.is_empty());
+        let _ = fs::remove_file(&tmp);
+    }
+
     fn require_odoo_bin_succeeds_when_present() {
         let tmp = std::env::temp_dir().join(format!("odx-odoo-bin-ok-{}", std::process::id()));
         let _ = fs::remove_dir_all(&tmp);

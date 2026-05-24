@@ -243,15 +243,26 @@ fn run_one_selector(
     runs: &mut Vec<TagRunResult>,
     heartbeat_seconds: u64,
 ) {
+    let odoo_log_path = match session {
+        Some(s) => s.dir.join("odoo.log"),
+        None => project_root.join(".testing").join("odoo-test.log"),
+    };
+    if let Some(parent) = odoo_log_path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+
     println!("===== Executing: {} =====", test_tags);
+    println!("Live Odoo log: {}", odoo_log_path.display());
 
     let mut parser = OutputParser::new();
     let heartbeat_msg = if heartbeat_seconds == 0 {
         "===== Still running tests (no heartbeat configured) =====".to_string()
     } else {
         format!(
-            "===== Still running tests: {} (no output for {}s) =====",
-            test_tags, heartbeat_seconds
+            "===== Still running tests: {} (no new log lines for {}s; tailing {}) =====",
+            test_tags,
+            heartbeat_seconds,
+            odoo_log_path.display()
         )
     };
 
@@ -291,7 +302,9 @@ fn run_one_selector(
     };
 
     let log_level_arg = format!("--log-level={}", odoo_log_level);
+    let logfile_arg = format!("--logfile={}", odoo_log_path.display());
     let args = vec![
+        "-u",
         odoo_bin_str,
         "-c",
         config_file_str,
@@ -306,6 +319,7 @@ fn run_one_selector(
         "--stop-after-init",
         "--without-demo",
         "all",
+        logfile_arg.as_str(),
         log_level_arg.as_str(),
     ];
 
@@ -316,7 +330,7 @@ fn run_one_selector(
         envs,
         |src, line| {
             match src {
-                StreamSource::Stdout => println!("{}", line),
+                StreamSource::Stdout | StreamSource::LogFile => println!("{}", line),
                 StreamSource::Stderr => eprintln!("{}", line),
             }
             parser.ingest(line);
@@ -325,6 +339,7 @@ fn run_one_selector(
             }
         },
         combined_log,
+        Some(&odoo_log_path),
         hb,
         &heartbeat_msg,
     );
