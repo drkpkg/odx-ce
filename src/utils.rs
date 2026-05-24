@@ -1110,17 +1110,4 @@ mod tests {
         assert!(more.is_empty());
         let _ = fs::remove_file(&tmp);
     }
-
-    fn require_odoo_bin_succeeds_when_present() {
-        let tmp = std::env::temp_dir().join(format!("odx-odoo-bin-ok-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&tmp);
-        let bin_dir = tmp.join("src/odoo");
-        fs::create_dir_all(&bin_dir).unwrap();
-        fs::write(bin_dir.join("odoo-bin"), "#!/bin/sh\n").unwrap();
-
-        let path = require_odoo_bin(&tmp).unwrap();
-        assert_eq!(path, bin_dir.join("odoo-bin"));
-
-        let _ = fs::remove_dir_all(&tmp);
-    }
 }
