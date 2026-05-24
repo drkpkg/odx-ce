@@ -168,11 +168,29 @@ pub fn execute(
     let mut warnings: BTreeSet<String> = BTreeSet::new();
     let mut run_index: usize = 0;
 
-    let modules_str = modules.join(",");
+    let init_plan = modules_to_init_from_tags(&tags_arg, &modules);
+    for unknown in &init_plan.unknown_in_tags {
+        let msg = format!(
+            "Unknown module in test-tags (skipped for --init): {}",
+            unknown
+        );
+        ui.warn(&msg);
+        warnings.insert(msg);
+    }
+    if init_plan.modules.is_empty() {
+        cleanup_db();
+        return Err("No modules to install".to_string());
+    }
+
+    let modules_str = init_plan.modules.join(",");
+    let modules_label = if init_plan.modules.len() == modules.len() {
+        format!("{}", init_plan.modules.len())
+    } else {
+        format!("{} ({})", init_plan.modules.len(), modules_str)
+    };
     println!(
         "Step 2: Installing {} modules and running tests with tags: {} (first log lines may take several minutes)...",
-        modules.len(),
-        tags_arg
+        modules_label, tags_arg
     );
     run_one_selector(
         &python,
@@ -329,29 +347,31 @@ fn run_one_selector(
 
     parser.flush_failure_block();
     let log_file = run_log_rel.unwrap_or_default();
-    match result {
-        Ok(_) => {
-            println!("===== Test passed: {} =====", test_tags);
-            runs.push(TagRunResult::from_parser(
-                test_tags.to_string(),
-                true,
-                None,
-                log_file,
-                &parser,
-            ));
-        }
-        Err(err) => {
-            eprintln!("===== Test failed: {} =====", test_tags);
+
+    let exit_ok = result.is_ok();
+    let tests_ok = parser.tests_ok();
+    let passed = exit_ok && tests_ok;
+    let exit_error = match &result {
+        Err(err) => Some(err.clone()),
+        Ok(_) if !tests_ok => Some("Tests failed (see log for FAIL/ERROR lines)".to_string()),
+        Ok(_) => None,
+    };
+
+    if passed {
+        println!("===== Test passed: {} =====", test_tags);
+    } else {
+        eprintln!("===== Test failed: {} =====", test_tags);
+        if let Some(ref err) = exit_error {
             eprintln!("{}", err);
-            runs.push(TagRunResult::from_parser(
-                test_tags.to_string(),
-                false,
-                Some(err),
-                log_file,
-                &parser,
-            ));
         }
     }
+    runs.push(TagRunResult::from_parser(
+        test_tags.to_string(),
+        passed,
+        exit_error,
+        log_file,
+        &parser,
+    ));
 }
 
 fn detect_wkhtmltopdf() -> Result<(String, PathBuf), String> {
@@ -392,6 +412,45 @@ fn build_path_env(extra_dir: &Path) -> Result<String, String> {
     let extra = extra_dir.to_string_lossy();
     // Put wkhtmltopdf directory first to ensure Odoo finds it.
     Ok(format!("{}:{}", extra, current))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ModulesInitPlan {
+    modules: Vec<String>,
+    unknown_in_tags: Vec<String>,
+}
+
+fn modules_to_init_from_tags(tags_arg: &str, available: &[String]) -> ModulesInitPlan {
+    let re = Regex::new(r"/([A-Za-z0-9_]+)").unwrap();
+    let available_set: BTreeSet<&str> = available.iter().map(String::as_str).collect();
+    let mut found: BTreeSet<String> = BTreeSet::new();
+    let mut unknown: BTreeSet<String> = BTreeSet::new();
+
+    for part in tags_arg.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        for caps in re.captures_iter(part) {
+            let name = caps.get(1).unwrap().as_str();
+            if available_set.contains(name) {
+                found.insert(name.to_string());
+            } else {
+                unknown.insert(name.to_string());
+            }
+        }
+    }
+
+    let modules = if found.is_empty() {
+        available.to_vec()
+    } else {
+        found.into_iter().collect()
+    };
+
+    ModulesInitPlan {
+        modules,
+        unknown_in_tags: unknown.into_iter().collect(),
+    }
 }
 
 fn normalize_specs(raw: &[String]) -> Vec<String> {
@@ -668,6 +727,8 @@ struct OutputParser {
     failed_re: Regex,
     fail_block_re: Regex,
     separator_re: Regex,
+    odoo_test_error_re: Regex,
+    odoo_test_error_count: u32,
 }
 
 impl OutputParser {
@@ -690,13 +751,35 @@ impl OutputParser {
             failed_re: Regex::new(r"^FAILED\s*\((.+)\)\s*$").unwrap(),
             fail_block_re: Regex::new(r"^(FAIL|ERROR):").unwrap(),
             separator_re: Regex::new(r"^-{10,}$").unwrap(),
+            odoo_test_error_re: Regex::new(
+                r"ERROR\s+test_\S+.*odoo\.addons\.\S+\.tests\.\S+:\s+ERROR:",
+            )
+            .unwrap(),
+            odoo_test_error_count: 0,
         }
+    }
+
+    fn tests_ok(&self) -> bool {
+        !self.failed
+            && self.failure_blocks.is_empty()
+            && self.errors.unwrap_or(0) == 0
+            && self.odoo_test_error_count == 0
     }
 
     fn ingest(&mut self, line: &str) {
         self.collect_warning(line);
+        self.parse_odoo_test_error(line);
         self.parse_failure_block(line);
         self.parse_unittest_summary(line);
+    }
+
+    fn parse_odoo_test_error(&mut self, line: &str) {
+        if self.odoo_test_error_re.is_match(line) {
+            self.failed = true;
+            self.odoo_test_error_count = self.odoo_test_error_count.saturating_add(1);
+            let current = self.errors.unwrap_or(0);
+            self.errors = Some(current.saturating_add(1));
+        }
     }
 
     fn flush_failure_block(&mut self) {
@@ -983,5 +1066,63 @@ mod tests {
 
         assert_eq!(parser.failure_blocks.len(), 1);
         assert!(parser.failure_blocks[0].contains("ERROR: test_baz"));
+    }
+
+    #[test]
+    fn modules_to_init_from_tags_uses_all_when_no_module_path() {
+        let available = vec!["mod_a".to_string(), "mod_b".to_string()];
+        let plan = modules_to_init_from_tags("intn", &available);
+        assert_eq!(plan.modules, available);
+        assert!(plan.unknown_in_tags.is_empty());
+    }
+
+    #[test]
+    fn modules_to_init_from_tags_extracts_module() {
+        let available = vec!["partner_vat_unique".to_string(), "other_mod".to_string()];
+        let plan = modules_to_init_from_tags("intn,/partner_vat_unique:TestX.test_y", &available);
+        assert_eq!(plan.modules, vec!["partner_vat_unique".to_string()]);
+        assert!(plan.unknown_in_tags.is_empty());
+    }
+
+    #[test]
+    fn modules_to_init_from_tags_unions_multiple_modules() {
+        let available = vec!["mod_a".to_string(), "mod_b".to_string()];
+        let plan = modules_to_init_from_tags("intn,/mod_a:TestA,/mod_b:TestB", &available);
+        assert_eq!(plan.modules, vec!["mod_a".to_string(), "mod_b".to_string()]);
+    }
+
+    #[test]
+    fn modules_to_init_from_tags_reports_unknown_module() {
+        let available = vec!["mod_a".to_string()];
+        let plan = modules_to_init_from_tags("intn,/missing_mod:TestX", &available);
+        assert_eq!(plan.modules, vec!["mod_a".to_string()]);
+        assert_eq!(plan.unknown_in_tags, vec!["missing_mod".to_string()]);
+    }
+
+    #[test]
+    fn output_parser_detects_odoo_test_error_log_line() {
+        let mut parser = OutputParser::new();
+        parser.ingest(
+            "2026-05-23 23:49:13,986 991887 ERROR test_odoo_1779580003 odoo.addons.intn_account_payment_group.tests.test_credit_note_report: ERROR: TestCreditNoteDetailReport.test_credit_note_detail_report_renders_pdf",
+        );
+        assert!(!parser.tests_ok());
+        assert_eq!(parser.odoo_test_error_count, 1);
+        assert_eq!(parser.errors, Some(1));
+    }
+
+    #[test]
+    fn output_parser_failed_summary_marks_tests_not_ok() {
+        let mut parser = OutputParser::new();
+        parser.ingest("Ran 3 tests in 0.5s");
+        parser.ingest("FAILED (failures=1)");
+        assert!(!parser.tests_ok());
+    }
+
+    #[test]
+    fn run_passed_requires_exit_and_parser_ok() {
+        let mut parser = OutputParser::new();
+        parser.ingest("Ran 1 tests in 0.001s");
+        parser.ingest("OK");
+        assert!(parser.tests_ok());
     }
 }
