@@ -1,6 +1,10 @@
 [package]
 name = "odoo-cli"
+<<<<<<< HEAD
 version = "1.2.1"
+=======
+version = "1.2.2"
+>>>>>>> 146daa8 ([FEAT] Release 1.2.2)
 edition = "2021"
 description = "odx: Odoo development CLI"
 license = "MIT"
