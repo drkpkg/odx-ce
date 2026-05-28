@@ -60,11 +60,20 @@ pub fn execute(
     let odoo_bin_str = odoo_bin.to_string_lossy().to_string();
     let config_file_str = config_file.to_string_lossy().to_string();
 
-    // Preflight wkhtmltopdf to avoid hanging tests.
-    let (wkhtml_path, wkhtml_dir) = detect_wkhtmltopdf()?;
-    let path_env = build_path_env(&wkhtml_dir)?;
-    let envs = [("PATH", path_env.as_str())];
-    ui.info(format!("wkhtmltopdf: {}", wkhtml_path));
+    // Preflight wkhtmltopdf when available (optional; avoids hanging tests when present).
+    let mut envs: Vec<(&str, &str)> = Vec::new();
+    let path_env = if let Some((wkhtml_path, wkhtml_dir)) = detect_wkhtmltopdf() {
+        ui.info(format!("wkhtmltopdf: {}", wkhtml_path));
+        Some(build_path_env(&wkhtml_dir)?)
+    } else {
+        ui.warn(
+            "wkhtmltopdf not found; continuing without it (install 0.12.6.1 with patched qt for PDF report tests)",
+        );
+        None
+    };
+    if let Some(path) = &path_env {
+        envs.push(("PATH", path.as_str()));
+    }
 
     // Always attempt to drop the temporary database.
     let dropped = Arc::new(AtomicBool::new(false));
@@ -501,11 +510,8 @@ fn run_one_selector(
     }
 }
 
-fn detect_wkhtmltopdf() -> Result<(String, PathBuf), String> {
-    let p = which::which("wkhtmltopdf").map_err(|_| {
-        "wkhtmltopdf not found on this system. Install wkhtmltopdf 0.12.6.1 (with patched qt)."
-            .to_string()
-    })?;
+fn detect_wkhtmltopdf() -> Option<(String, PathBuf)> {
+    let p = which::which("wkhtmltopdf").ok()?;
     let path_str = p.to_string_lossy().to_string();
 
     // Best-effort version check
@@ -527,11 +533,8 @@ fn detect_wkhtmltopdf() -> Result<(String, PathBuf), String> {
         }
     }
 
-    let dir = p
-        .parent()
-        .ok_or_else(|| format!("Invalid wkhtmltopdf path: {}", path_str))?
-        .to_path_buf();
-    Ok((path_str, dir))
+    let dir = p.parent()?.to_path_buf();
+    Some((path_str, dir))
 }
 
 fn build_path_env(extra_dir: &Path) -> Result<String, String> {
