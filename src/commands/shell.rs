@@ -1,10 +1,11 @@
 use crate::ui::Ui;
 use crate::utils::{
     build_addons_path, ensure_odoo_conf_local, ensure_venv, execute_command, find_project_root,
-    find_python_command, require_odoo_bin,
+    find_python_command, require_odoo_bin, validate_db_name,
 };
 
 pub fn execute(_ui: &Ui, database: &str) -> Result<(), String> {
+    validate_db_name(database)?;
     ensure_venv()?;
 
     let project_root = find_project_root()?;

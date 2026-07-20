@@ -5,6 +5,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 #[derive(Parser)]
 #[command(name = "odx")]
 #[command(about = "odx: Odoo development CLI", long_about = None)]
+#[command(version)]
 pub struct Cli {
     /// Python version to use (e.g. 3.11, 3.12). Default: 3.11. Used by 'new' for the project venv.
     #[arg(global = true, long, default_value = "3.11")]
@@ -50,7 +51,11 @@ impl From<CliColor> for ColorMode {
 #[derive(Subcommand)]
 pub enum Commands {
     /// Run Odoo server
-    Run,
+    Run {
+        /// Skip the live log dashboard and stream plain (level-colored) log lines instead
+        #[arg(long, default_value_t = false)]
+        plain: bool,
+    },
 
     /// Update all Odoo modules
     Update {
@@ -116,9 +121,6 @@ pub enum Commands {
     /// Sync Odoo source (git pull in src/odoo)
     Sync,
 
-    /// Setup development environment
-    Setup,
-
     /// Clean temporary files
     Clean,
 
@@ -147,8 +149,8 @@ impl Cli {
             progress: !self.no_progress,
         });
 
-        match self.command {
-            Commands::Run => commands::run::execute(&ui),
+        let result = match self.command {
+            Commands::Run { plain } => commands::run::execute(&ui, plain),
             Commands::Update { database } => commands::update::execute(&ui, &database),
             Commands::UpdateModule { module, database } => {
                 commands::update_module::execute(&ui, &module, &database)
@@ -176,7 +178,6 @@ impl Cli {
             ),
             Commands::Install => commands::install::execute(&ui),
             Commands::Sync => commands::sync::execute(&ui),
-            Commands::Setup => commands::setup::execute(&ui),
             Commands::Clean => commands::clean::execute(&ui),
             Commands::New {
                 project_name,
@@ -184,6 +185,12 @@ impl Cli {
                 cd,
             } => commands::new::execute(&ui, &project_name, &version, cd, &self.python),
             Commands::Doctor => commands::doctor::execute(&ui),
+        };
+
+        if let Err(ref e) = result {
+            ui.error(format!("Error: {}", e));
         }
+
+        result
     }
 }

@@ -4,8 +4,7 @@ use odoo_cli::cli::Cli;
 fn main() {
     let cli = Cli::parse();
 
-    if let Err(e) = cli.run() {
-        eprintln!("Error: {}", e);
+    if cli.run().is_err() {
         std::process::exit(1);
     }
 }

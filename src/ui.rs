@@ -83,9 +83,6 @@ impl Ui {
     }
 
     pub fn error(&self, msg: impl AsRef<str>) {
-        if self.cfg.json {
-            return;
-        }
         if self.use_color() {
             eprintln!("{}", style(msg.as_ref()).red().bold());
         } else {

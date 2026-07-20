@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use crate::ui::Ui;
 use crate::utils::{
     build_addons_path, ensure_odoo_conf_local, ensure_venv, execute_command, find_project_root,
-    find_python_command, project_addon_modules, require_odoo_bin,
+    find_python_command, project_addon_modules, require_odoo_bin, validate_db_name,
 };
 
 const TEMPLATE_LANG: &str = "en_US";
@@ -15,6 +15,7 @@ pub fn execute(
     module: Option<&str>,
     lang: Option<&str>,
 ) -> Result<(), String> {
+    validate_db_name(database)?;
     ensure_venv()?;
 
     let project_root = find_project_root()?;

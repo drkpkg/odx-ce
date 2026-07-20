@@ -5,7 +5,6 @@ pub mod i18n;
 pub mod install;
 pub mod new;
 pub mod run;
-pub mod setup;
 pub mod shell;
 pub mod sync;
 pub mod test;

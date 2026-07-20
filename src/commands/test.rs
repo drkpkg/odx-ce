@@ -60,7 +60,7 @@ pub fn execute(
 
     // Preflight wkhtmltopdf when available (optional; avoids hanging tests when present).
     let mut envs: Vec<(&str, &str)> = Vec::new();
-    let path_env = if let Some((wkhtml_path, wkhtml_dir)) = detect_wkhtmltopdf() {
+    let path_env = if let Some((wkhtml_path, wkhtml_dir)) = detect_wkhtmltopdf(ui) {
         ui.info(format!("wkhtmltopdf: {}", wkhtml_path));
         Some(build_path_env(&wkhtml_dir)?)
     } else {
@@ -110,8 +110,9 @@ pub fn execute(
     // Ctrl+C cleanup (cross-platform)
     {
         let cleanup = cleanup_db.clone();
+        let ui = ui.clone();
         ctrlc::set_handler(move || {
-            eprintln!("Received Ctrl+C. Attempting to drop temporary database...");
+            ui.warn("Received Ctrl+C. Attempting to drop temporary database...");
             cleanup();
             std::process::exit(130);
         })
@@ -124,11 +125,12 @@ pub fn execute(
         use signal_hook::consts::signal::SIGTERM;
         use signal_hook::iterator::Signals;
         let cleanup = cleanup_db.clone();
+        let ui = ui.clone();
         let mut signals =
             Signals::new([SIGTERM]).map_err(|e| format!("Failed to register SIGTERM: {}", e))?;
         std::thread::spawn(move || {
             if signals.forever().next().is_some() {
-                eprintln!("Received SIGTERM. Attempting to drop temporary database...");
+                ui.warn("Received SIGTERM. Attempting to drop temporary database...");
                 cleanup();
                 std::process::exit(143);
             }
@@ -136,7 +138,7 @@ pub fn execute(
     }
 
     // Step 1: Create database and install base module
-    println!("Step 1: Creating database and installing base module...");
+    ui.info("Step 1: Creating database and installing base module...");
     let args = vec![
         odoo_bin_str.as_str(),
         "-c",
@@ -197,11 +199,12 @@ pub fn execute(
     } else {
         format!("{} ({})", init_plan.modules.len(), modules_str)
     };
-    println!(
+    ui.info(format!(
         "Step 2: Installing {} modules and running tests with tags: {} (first log lines may take several minutes)...",
         modules_label, tags_arg
-    );
+    ));
     run_one_selector(
+        ui,
         &python,
         &project_root,
         &envs,
@@ -223,7 +226,7 @@ pub fn execute(
         finalize_test_session(s, &runs, &warnings)?;
     }
 
-    print_summary(&runs, &warnings, session.as_ref());
+    print_summary(ui, &runs, &warnings, session.as_ref());
 
     cleanup_db();
 
@@ -236,6 +239,7 @@ pub fn execute(
 
 #[allow(clippy::too_many_arguments)]
 fn run_one_selector(
+    ui: &Ui,
     python: &str,
     project_root: &Path,
     envs: &[(&str, &str)],
@@ -260,8 +264,8 @@ fn run_one_selector(
         let _ = fs::create_dir_all(parent);
     }
 
-    println!("===== Executing: {} =====", test_tags);
-    println!("Live Odoo log: {}", odoo_log_path.display());
+    ui.info(format!("===== Executing: {} =====", test_tags));
+    ui.info(format!("Live Odoo log: {}", odoo_log_path.display()));
 
     let mut parser = OutputParser::new();
     let heartbeat_msg = if heartbeat_seconds == 0 {
@@ -292,11 +296,11 @@ fn run_one_selector(
             {
                 Ok(file) => Some(file),
                 Err(e) => {
-                    eprintln!(
+                    ui.warn(format!(
                         "Warning: failed to open run log {}: {}",
                         run_log_path.display(),
                         e
-                    );
+                    ));
                     None
                 }
             };
@@ -382,11 +386,11 @@ fn run_one_selector(
     };
 
     if passed {
-        println!("===== Test passed: {} =====", test_tags);
+        ui.success(format!("===== Test passed: {} =====", test_tags));
     } else {
-        eprintln!("===== Test failed: {} =====", test_tags);
+        ui.error(format!("===== Test failed: {} =====", test_tags));
         if let Some(ref err) = exit_error {
-            eprintln!("{}", err);
+            ui.error(err);
         }
     }
     runs.push(TagRunResult::from_parser(
@@ -398,7 +402,7 @@ fn run_one_selector(
     ));
 }
 
-fn detect_wkhtmltopdf() -> Option<(String, PathBuf)> {
+fn detect_wkhtmltopdf(ui: &Ui) -> Option<(String, PathBuf)> {
     let p = which::which("wkhtmltopdf").ok()?;
     let path_str = p.to_string_lossy().to_string();
 
@@ -414,10 +418,10 @@ fn detect_wkhtmltopdf() -> Option<(String, PathBuf)> {
             String::from_utf8_lossy(&o.stderr)
         );
         if !text.contains("0.12.6.1") || !text.to_lowercase().contains("patched qt") {
-            eprintln!(
+            ui.warn(format!(
                 "Warning: wkhtmltopdf version does not look like 0.12.6.1 (with patched qt). Output: {}",
                 text.trim()
-            );
+            ));
         }
     }
 
@@ -428,8 +432,9 @@ fn detect_wkhtmltopdf() -> Option<(String, PathBuf)> {
 fn build_path_env(extra_dir: &Path) -> Result<String, String> {
     let current = std::env::var("PATH").unwrap_or_default();
     let extra = extra_dir.to_string_lossy();
+    let sep = if cfg!(windows) { ";" } else { ":" };
     // Put wkhtmltopdf directory first to ensure Odoo finds it.
-    Ok(format!("{}:{}", extra, current))
+    Ok(format!("{}{}{}", extra, sep, current))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -907,6 +912,7 @@ impl TagRunResult {
 }
 
 fn print_summary(
+    ui: &Ui,
     runs: &[TagRunResult],
     warnings: &BTreeSet<String>,
     session: Option<&TestSession>,
@@ -915,63 +921,69 @@ fn print_summary(
     let passed = runs.iter().filter(|r| r.passed).count();
     let failed = total - passed;
 
-    println!();
-    println!("================= Test Summary =================");
-    println!("Total runs: {}", total);
-    println!("Passed: {}", passed);
-    println!("Failed: {}", failed);
+    ui.info("");
+    ui.info("================= Test Summary =================");
+    ui.info(format!("Total runs: {}", total));
+    ui.info(format!("Passed: {}", passed));
+    ui.info(format!("Failed: {}", failed));
 
     let total_skipped: u32 = runs.iter().filter_map(|r| r.skipped).sum();
     let have_skipped = runs.iter().any(|r| r.skipped.is_some());
     if have_skipped {
-        println!("Skipped (parsed): {}", total_skipped);
+        ui.info(format!("Skipped (parsed): {}", total_skipped));
     }
 
     if failed > 0 {
-        println!();
-        println!("Failures:");
+        ui.warn("");
+        ui.warn("Failures:");
         for r in runs.iter().filter(|r| !r.passed) {
-            println!(
+            ui.warn(format!(
                 "- {} (ran={:?}, failures={:?}, errors={:?}, skipped={:?})",
                 r.selector, r.ran_tests, r.failures, r.errors, r.skipped
-            );
+            ));
             if !r.log_file.is_empty() {
-                println!("  log: {}", r.log_file);
+                ui.warn(format!("  log: {}", r.log_file));
             }
             if let Some(err) = &r.exit_error {
-                println!("  exit: {}", err);
+                ui.warn(format!("  exit: {}", err));
             }
             if let Some(block) = r.failure_blocks.first() {
                 let preview: String = block.lines().take(8).collect::<Vec<_>>().join("\n");
-                println!("  failure preview:\n{}", indent_lines(&preview, "    "));
+                ui.warn(format!(
+                    "  failure preview:\n{}",
+                    indent_lines(&preview, "    ")
+                ));
             }
         }
     }
 
     if !warnings.is_empty() {
-        println!();
-        println!("Warnings (unique, console capped): {}", warnings.len());
+        ui.info("");
+        ui.info(format!(
+            "Warnings (unique, console capped): {}",
+            warnings.len()
+        ));
         for w in warnings.iter().take(50) {
-            println!("- {}", w);
+            ui.info(format!("- {}", w));
         }
         if warnings.len() > 50 {
-            println!("... ({} more)", warnings.len() - 50);
+            ui.info(format!("... ({} more)", warnings.len() - 50));
         }
     }
 
     if let Some(s) = session {
-        println!();
-        println!("Session artifacts: {}", s.dir.display());
-        println!("  report.json");
-        println!("  combined.log: {}", s.combined_log.display());
-        println!("  warnings.log: {}", s.warnings_log.display());
-        println!(
+        ui.info("");
+        ui.info(format!("Session artifacts: {}", s.dir.display()));
+        ui.info("  report.json");
+        ui.info(format!("  combined.log: {}", s.combined_log.display()));
+        ui.info(format!("  warnings.log: {}", s.warnings_log.display()));
+        ui.info(format!(
             "  runs/ ({} files)",
             runs.iter().filter(|r| !r.log_file.is_empty()).count()
-        );
+        ));
     }
 
-    println!("================================================");
+    ui.info("================================================");
 }
 
 fn indent_lines(text: &str, prefix: &str) -> String {
@@ -1142,5 +1154,13 @@ mod tests {
         parser.ingest("Ran 1 tests in 0.001s");
         parser.ingest("OK");
         assert!(parser.tests_ok());
+    }
+
+    #[test]
+    fn build_path_env_uses_platform_separator() {
+        let extra = Path::new("/opt/wkhtmltopdf/bin");
+        let result = build_path_env(extra).unwrap();
+        let sep = if cfg!(windows) { ";" } else { ":" };
+        assert!(result.starts_with(&format!("{}{}", extra.display(), sep)));
     }
 }

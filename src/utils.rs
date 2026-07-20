@@ -13,9 +13,35 @@ fn has_compose_file(dir: &Path) -> bool {
     dir.join("compose.yml").exists() || dir.join("compose.yaml").exists()
 }
 
+/// Validate a PostgreSQL/Odoo database name before it is passed to a subprocess.
+/// Conservative on purpose: only letters, numbers and underscore (covers `my_db`,
+/// `test_odoo_123`, etc.) so obviously wrong names fail fast with a clear message
+/// instead of a confusing error from odoo-bin/psql.
+pub fn validate_db_name(db: &str) -> Result<(), String> {
+    if db.is_empty() {
+        return Err("Database name cannot be empty".to_string());
+    }
+    let ok = db.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+    if !ok {
+        return Err(format!(
+            "Invalid database name '{}'. Allowed characters: letters, numbers, underscore (_)",
+            db
+        ));
+    }
+    Ok(())
+}
+
 pub fn find_project_root() -> Result<PathBuf, String> {
-    let mut current =
+    let current =
         std::env::current_dir().map_err(|e| format!("Failed to get current directory: {}", e))?;
+    find_project_root_from(&current)
+}
+
+/// Pure directory-walking logic behind `find_project_root`, taking the starting
+/// directory explicitly instead of reading the real process cwd. Lets tests probe
+/// arbitrary directories without mutating global process state.
+fn find_project_root_from(start: &Path) -> Result<PathBuf, String> {
+    let mut current = start.to_path_buf();
 
     loop {
         if has_compose_file(&current) {
@@ -1037,10 +1063,7 @@ mod tests {
         fs::create_dir_all(&tmp).unwrap();
         fs::write(tmp.join("compose.yml"), "services: {}\n").unwrap();
 
-        let prev = std::env::current_dir().unwrap();
-        std::env::set_current_dir(&tmp).unwrap();
-        let root = find_project_root();
-        std::env::set_current_dir(prev).unwrap();
+        let root = find_project_root_from(&tmp);
 
         assert_eq!(root.unwrap(), tmp);
         let _ = fs::remove_dir_all(&tmp);
@@ -1053,10 +1076,7 @@ mod tests {
         fs::create_dir_all(&tmp).unwrap();
         fs::write(tmp.join("compose.yaml"), "services: {}\n").unwrap();
 
-        let prev = std::env::current_dir().unwrap();
-        std::env::set_current_dir(&tmp).unwrap();
-        let root = find_project_root();
-        std::env::set_current_dir(prev).unwrap();
+        let root = find_project_root_from(&tmp);
 
         assert_eq!(root.unwrap(), tmp);
         let _ = fs::remove_dir_all(&tmp);
@@ -1068,13 +1088,23 @@ mod tests {
         let _ = fs::remove_dir_all(&tmp);
         fs::create_dir_all(&tmp).unwrap();
 
-        let prev = std::env::current_dir().unwrap();
-        std::env::set_current_dir(&tmp).unwrap();
-        let err = find_project_root().unwrap_err();
-        std::env::set_current_dir(prev).unwrap();
+        let err = find_project_root_from(&tmp).unwrap_err();
 
         assert!(err.contains("compose.yml") || err.contains("compose.yaml"));
         let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn validate_db_name_accepts_alnum_and_underscore() {
+        assert!(validate_db_name("my_db").is_ok());
+        assert!(validate_db_name("test_odoo_123").is_ok());
+    }
+
+    #[test]
+    fn validate_db_name_rejects_empty_and_special_chars() {
+        assert!(validate_db_name("").is_err());
+        assert!(validate_db_name("my-db").is_err());
+        assert!(validate_db_name("my db; drop table").is_err());
     }
 
     #[test]

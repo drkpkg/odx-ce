@@ -60,7 +60,6 @@ Los scripts dejan los artefactos en `dist/`:
 - `odx test [<tags>...]`
 - `odx install`
 - `odx sync`
-- `odx setup`
 - `odx clean`
 - `odx new <project> -v <version> [--cd]`
 - `odx doctor`

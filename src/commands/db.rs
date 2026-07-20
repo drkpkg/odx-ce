@@ -1,22 +1,8 @@
 use crate::ui::Ui;
-use crate::utils::{execute_command, find_docker_compose_command, find_project_root};
+use crate::utils::{
+    execute_command, find_docker_compose_command, find_project_root, validate_db_name,
+};
 use clap::Subcommand;
-
-fn validate_db_name(db: &str) -> Result<(), String> {
-    if db.is_empty() {
-        return Err("Database name cannot be empty".to_string());
-    }
-    // Conservative validation to avoid passing arbitrary values to subprocesses.
-    // Supports typical Odoo DB names like `my_db`, `test_odoo_123`.
-    let ok = db.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
-    if !ok {
-        return Err(format!(
-            "Invalid database name '{}'. Allowed characters: letters, numbers, underscore (_)",
-            db
-        ));
-    }
-    Ok(())
-}
 
 #[derive(Subcommand)]
 pub enum DbCommands {
