@@ -82,11 +82,7 @@ mod tests {
         let _ = fs::remove_dir_all(&tmp);
 
         fs::create_dir_all(tmp.join("custom_addons/my_module/__pycache__")).unwrap();
-        fs::write(
-            tmp.join("custom_addons/my_module/__pycache__/mod.pyc"),
-            "",
-        )
-        .unwrap();
+        fs::write(tmp.join("custom_addons/my_module/__pycache__/mod.pyc"), "").unwrap();
         fs::write(tmp.join("custom_addons/my_module/stray.log"), "").unwrap();
 
         remove_dir_all_matches(&tmp, "__pycache__").unwrap();

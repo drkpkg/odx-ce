@@ -297,10 +297,7 @@ fn render(frame: &mut Frame, app: &App, title: &str) {
         let mut spans = vec![
             Span::raw(format!("filter: [{}]", app.filter.label())),
             Span::raw(format!("   {:.1} lines/s", app.rate)),
-            Span::raw(format!(
-                "   uptime {}s",
-                app.start.elapsed().as_secs()
-            )),
+            Span::raw(format!("   uptime {}s", app.start.elapsed().as_secs())),
             Span::raw("   "),
             indicator,
         ];
@@ -424,7 +421,9 @@ fn event_loop(
 
         let timeout = TICK.saturating_sub(last_tick.elapsed());
         if event::poll(timeout).map_err(|e| format!("Failed to poll input: {}", e))? {
-            if let Event::Key(key) = event::read().map_err(|e| format!("Failed to read input: {}", e))? {
+            if let Event::Key(key) =
+                event::read().map_err(|e| format!("Failed to read input: {}", e))?
+            {
                 if key.kind == KeyEventKind::Press {
                     app.handle_key(key);
                 }
@@ -454,7 +453,12 @@ fn event_loop(
 /// Run the interactive log dashboard for a child process, taking ownership of it
 /// until the user quits (or the child exits on its own). The full, unfiltered log is
 /// always mirrored to `session_log_path` regardless of what's filtered on screen.
-pub fn run(mut child: Child, session_log_path: PathBuf, title: String, ui: &Ui) -> Result<(), String> {
+pub fn run(
+    mut child: Child,
+    session_log_path: PathBuf,
+    title: String,
+    ui: &Ui,
+) -> Result<(), String> {
     let stdout_pipe: ChildStdout = child
         .stdout
         .take()
