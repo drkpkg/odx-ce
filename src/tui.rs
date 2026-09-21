@@ -34,6 +34,8 @@ pub enum LogLevel {
     Error,
     Critical,
     Unknown,
+    /// Emitted by odx itself (restart markers), never parsed from odoo-bin output.
+    Notice,
 }
 
 impl LogLevel {
@@ -45,6 +47,7 @@ impl LogLevel {
             LogLevel::Error => Color::Red,
             LogLevel::Critical => Color::Magenta,
             LogLevel::Unknown => Color::Gray,
+            LogLevel::Notice => Color::Cyan,
         }
     }
 }
@@ -61,6 +64,9 @@ fn level_regex() -> &'static Regex {
 pub struct OdooLogLine {
     pub raw: String,
     pub level: LogLevel,
+    /// Lowercased copy of `raw`, built once here so the search filter doesn't
+    /// re-lowercase the whole buffer on every redraw (~7 frames/s x 10k lines).
+    lower: String,
 }
 
 impl OdooLogLine {
@@ -80,6 +86,18 @@ impl OdooLogLine {
         Self {
             raw: raw.to_string(),
             level,
+            lower: raw.to_lowercase(),
+        }
+    }
+
+    /// A line written by odx itself rather than by odoo-bin.
+    fn notice(msg: impl Into<String>) -> Self {
+        let raw = msg.into();
+        let lower = raw.to_lowercase();
+        Self {
+            raw,
+            level: LogLevel::Notice,
+            lower,
         }
     }
 }
@@ -87,8 +105,16 @@ impl OdooLogLine {
 /// Colorize a raw Odoo log line by level for the non-TUI fallback path (piping,
 /// `--json`, `--no-progress`, `--plain`, non-TTY). Returns the line unchanged when
 /// `ui` says colors are off, so callers don't need to branch on that themselves.
+///
+/// Callers colorizing a whole log stream should resolve the flag once and use
+/// [`colorize_with`] instead of asking `ui` per line.
 pub fn colorize(ui: &Ui, line: &OdooLogLine) -> String {
-    if !ui.use_color() {
+    colorize_with(ui.use_color(), line)
+}
+
+/// [`colorize`] with the color decision already made by the caller.
+pub fn colorize_with(use_color: bool, line: &OdooLogLine) -> String {
+    if !use_color {
         return line.raw.clone();
     }
     match line.level {
@@ -96,6 +122,7 @@ pub fn colorize(ui: &Ui, line: &OdooLogLine) -> String {
         LogLevel::Warning => style(&line.raw).yellow().to_string(),
         LogLevel::Error => style(&line.raw).red().bold().to_string(),
         LogLevel::Critical => style(&line.raw).magenta().bold().to_string(),
+        LogLevel::Notice => style(&line.raw).cyan().to_string(),
         LogLevel::Info | LogLevel::Unknown => line.raw.clone(),
     }
 }
@@ -128,6 +155,11 @@ impl LevelFilter {
     }
 
     fn matches(self, level: LogLevel) -> bool {
+        // odx's own markers stay visible whatever the filter is set to, otherwise a
+        // restart would silently vanish from a filtered view.
+        if matches!(level, LogLevel::Notice) {
+            return true;
+        }
         match self {
             LevelFilter::All => true,
             LevelFilter::Info => !matches!(level, LogLevel::Debug),
@@ -168,7 +200,7 @@ impl LogBuffer {
         self.lines
             .iter()
             .filter(|l| filter.matches(l.level))
-            .filter(|l| needle.is_empty() || l.raw.to_lowercase().contains(&needle))
+            .filter(|l| needle.is_empty() || l.lower.contains(&needle))
             .collect()
     }
 }
@@ -183,7 +215,14 @@ struct App {
     /// an absolute index, the view keeps its distance as new lines arrive instead of
     /// freezing on stale buffer positions once old lines get evicted.
     scroll: usize,
+    /// Largest useful `scroll` for the last rendered frame. `render` keeps it up to
+    /// date so key handling can clamp instead of letting `scroll` run away past the
+    /// top of the buffer (which would make Down/'j' inert until it counted back down).
+    max_scroll: usize,
     should_quit: bool,
+    /// Set by the 'r' key; the event loop performs the restart (it owns the child).
+    restart_requested: bool,
+    restarts: usize,
     running: bool,
     start: Instant,
     rate: f64,
@@ -200,7 +239,10 @@ impl App {
             search_query: String::new(),
             search_input: None,
             scroll: 0,
+            max_scroll: 0,
             should_quit: false,
+            restart_requested: false,
+            restarts: 0,
             running: true,
             start: now,
             rate: 0.0,
@@ -210,6 +252,14 @@ impl App {
     }
 
     fn handle_key(&mut self, key: KeyEvent) {
+        // Raw mode means the terminal no longer turns Ctrl+C into SIGINT, so it has to
+        // be handled here — including while typing a search query, where it used to be
+        // swallowed as a literal 'c'.
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+            self.should_quit = true;
+            return;
+        }
+
         if let Some(buf) = self.search_input.as_mut() {
             match key.code {
                 KeyCode::Enter => {
@@ -220,7 +270,14 @@ impl App {
                 KeyCode::Backspace => {
                     buf.pop();
                 }
-                KeyCode::Char(c) => buf.push(c),
+                // Modified keys (Ctrl+D, Alt+F, ...) are chords, not text input.
+                KeyCode::Char(c)
+                    if !key
+                        .modifiers
+                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                {
+                    buf.push(c)
+                }
                 _ => {}
             }
             return;
@@ -228,18 +285,23 @@ impl App {
 
         match key.code {
             KeyCode::Char('q') => self.should_quit = true,
-            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.should_quit = true;
-            }
+            KeyCode::Char('r') => self.restart_requested = true,
             KeyCode::Char('l') => self.filter = self.filter.next(),
             KeyCode::Char('/') => self.search_input = Some(String::new()),
             KeyCode::Esc => self.search_query.clear(),
-            KeyCode::Char('g') => self.scroll = usize::MAX,
+            KeyCode::Char('g') => self.scroll = self.max_scroll,
             KeyCode::Char('G') => self.scroll = 0,
-            KeyCode::Up | KeyCode::Char('k') => self.scroll = self.scroll.saturating_add(1),
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.scroll = self.scroll.saturating_add(1).min(self.max_scroll)
+            }
             KeyCode::Down | KeyCode::Char('j') => self.scroll = self.scroll.saturating_sub(1),
             _ => {}
         }
+    }
+
+    /// Append a line from odx itself to the on-screen buffer.
+    fn notice(&mut self, msg: impl Into<String>) {
+        self.buffer.push(OdooLogLine::notice(msg));
     }
 
     fn maybe_refresh_rate(&mut self) {
@@ -254,7 +316,7 @@ impl App {
     }
 }
 
-fn render(frame: &mut Frame, app: &App, title: &str) {
+fn render(frame: &mut Frame, app: &mut App, title: &str) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(3), Constraint::Length(1)])
@@ -264,7 +326,11 @@ fn render(frame: &mut Frame, app: &App, title: &str) {
     let body_area = chunks[0];
     let body_height = body_area.height.saturating_sub(2) as usize;
     let max_scroll = visible.len().saturating_sub(body_height);
-    let scroll = app.scroll.min(max_scroll);
+    app.max_scroll = max_scroll;
+    // Clamp the stored value, not just this frame's copy: a filter change or evicted
+    // lines can shrink the buffer under a scrolled-up view.
+    app.scroll = app.scroll.min(max_scroll);
+    let scroll = app.scroll;
     let end = visible.len().saturating_sub(scroll);
     let start = end.saturating_sub(body_height);
 
@@ -273,7 +339,7 @@ fn render(frame: &mut Frame, app: &App, title: &str) {
         .map(|l| Line::styled(l.raw.clone(), Style::default().fg(l.level.color())))
         .collect();
 
-    let keybinds = "[q]uit [/]search [l]evel [g/G]top/bottom";
+    let keybinds = "[q]uit [r]estart [/]search [l]evel [g/G]top/bottom";
     let block = Block::default()
         .borders(Borders::ALL)
         .title(Line::from(format!(" {} ", title)))
@@ -301,6 +367,9 @@ fn render(frame: &mut Frame, app: &App, title: &str) {
             Span::raw("   "),
             indicator,
         ];
+        if app.restarts > 0 {
+            spans.push(Span::raw(format!("   restarts: {}", app.restarts)));
+        }
         if !app.search_query.is_empty() {
             spans.push(Span::raw(format!("   search: {:?}", app.search_query)));
         }
@@ -311,11 +380,18 @@ fn render(frame: &mut Frame, app: &App, title: &str) {
 
 fn setup_terminal() -> Result<Terminal<CrosstermBackend<io::Stdout>>, String> {
     enable_raw_mode().map_err(|e| format!("Failed to enable raw mode: {}", e))?;
+    // From here on every failure path has to undo raw mode (and the alternate screen)
+    // before returning, or odx exits leaving the user with a terminal that no longer
+    // echoes input.
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)
-        .map_err(|e| format!("Failed to enter alternate screen: {}", e))?;
-    Terminal::new(CrosstermBackend::new(stdout))
-        .map_err(|e| format!("Failed to initialize terminal: {}", e))
+    if let Err(e) = execute!(stdout, EnterAlternateScreen) {
+        restore_terminal_best_effort();
+        return Err(format!("Failed to enter alternate screen: {}", e));
+    }
+    Terminal::new(CrosstermBackend::new(stdout)).map_err(|e| {
+        restore_terminal_best_effort();
+        format!("Failed to initialize terminal: {}", e)
+    })
 }
 
 fn restore_terminal() -> Result<(), String> {
@@ -371,47 +447,133 @@ fn open_session_log(path: &Path) -> Result<Arc<Mutex<fs::File>>, String> {
     Ok(Arc::new(Mutex::new(file)))
 }
 
+/// Spawns odoo-bin and wires the new process's stdout/stderr into the dashboard's
+/// channel and the session log. Used for the first start and for every restart, so
+/// both go through exactly the same plumbing.
+struct Supervisor<'a> {
+    spawn: &'a mut dyn FnMut() -> Result<Child, String>,
+    tx: Sender<String>,
+    log: Arc<Mutex<fs::File>>,
+}
+
+impl Supervisor<'_> {
+    fn start(&mut self) -> Result<Child, String> {
+        let mut child = (self.spawn)()?;
+        let stdout: ChildStdout = child
+            .stdout
+            .take()
+            .ok_or("Failed to capture odoo-bin stdout")?;
+        let stderr: ChildStderr = child
+            .stderr
+            .take()
+            .ok_or("Failed to capture odoo-bin stderr")?;
+        spawn_reader(stdout, self.tx.clone(), Some(self.log.clone()));
+        spawn_reader(stderr, self.tx.clone(), Some(self.log.clone()));
+        Ok(child)
+    }
+
+    /// Write a marker straight to the session log, so restarts are visible when
+    /// reading run.log later instead of two runs blurring into one.
+    fn note(&self, msg: &str) {
+        if let Ok(mut f) = self.log.lock() {
+            let _ = writeln!(f, "{}", msg);
+        }
+    }
+}
+
+/// Signal the child's whole process group on Unix, falling back to the single pid if
+/// it isn't a group leader. Odoo in prefork mode (`workers > 0`) forks HTTP/cron
+/// workers that hold the listening socket, so signalling only the master leaves them
+/// running and the next `odx run` fails with "Address already in use". Callers that
+/// spawn the child themselves should put it in its own group (see `commands::run`).
+#[cfg(unix)]
+fn signal_process_group(child: &Child, signal: libc::c_int) {
+    let pid = child.id() as libc::pid_t;
+    unsafe {
+        // Negative pid = "every process in the group with that id".
+        if libc::kill(-pid, signal) == -1 {
+            libc::kill(pid, signal);
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StopResult {
+    AlreadyExited,
+    Stopped,
+    /// The graceful window expired and the process group had to be killed.
+    Forced,
+}
+
 /// Best-effort stop: SIGINT first so odoo-bin/werkzeug can shut down cleanly (this is
 /// what happens today when Ctrl+C reaches the child directly through the terminal's
-/// process group); fall back to a hard kill if it doesn't exit in time. Windows has no
-/// equivalent to a graceful SIGINT here, so it goes straight to `Child::kill()` — this
-/// mirrors the existing Unix-only signal handling in `commands/test.rs`.
-fn stop_child(child: &mut Child, ui: &Ui) {
+/// process group); fall back to a hard kill if it doesn't exit in time. Returns what
+/// it had to do instead of reporting it, because the caller may be inside the
+/// alternate screen (a restart) where printing would corrupt the display.
+#[cfg(unix)]
+fn stop_child(child: &mut Child) -> StopResult {
     if matches!(child.try_wait(), Ok(Some(_))) {
-        return;
+        return StopResult::AlreadyExited;
     }
 
-    #[cfg(unix)]
-    {
-        unsafe {
-            libc::kill(child.id() as libc::pid_t, libc::SIGINT);
+    signal_process_group(child, libc::SIGINT);
+    let deadline = Instant::now() + GRACEFUL_STOP_TIMEOUT;
+    while Instant::now() < deadline {
+        if matches!(child.try_wait(), Ok(Some(_))) {
+            return StopResult::Stopped;
         }
-        let deadline = Instant::now() + GRACEFUL_STOP_TIMEOUT;
-        while Instant::now() < deadline {
-            if matches!(child.try_wait(), Ok(Some(_))) {
-                return;
-            }
-            thread::sleep(Duration::from_millis(100));
-        }
-        ui.warn("odoo-bin did not stop gracefully in time, forcing shutdown...");
+        thread::sleep(Duration::from_millis(100));
     }
 
+    // Take the workers down with the master; `Child::kill()` only covers the process
+    // we spawned.
+    signal_process_group(child, libc::SIGKILL);
     let _ = child.kill();
     let _ = child.wait();
+    StopResult::Forced
+}
+
+/// Windows has no equivalent to a graceful SIGINT here, so it goes straight to
+/// `Child::kill()` — this mirrors the existing Unix-only signal handling in
+/// `commands/test.rs`.
+#[cfg(not(unix))]
+fn stop_child(child: &mut Child) -> StopResult {
+    if matches!(child.try_wait(), Ok(Some(_))) {
+        return StopResult::AlreadyExited;
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    StopResult::Stopped
+}
+
+/// How the dashboard session ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Outcome {
+    /// The user quit while odoo-bin was still running; the caller must stop it.
+    UserQuit,
+    /// odoo-bin exited on its own. `code` is `None` when it was killed by a signal.
+    ChildExited { code: Option<i32> },
 }
 
 fn event_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     child: &mut Child,
-    rx: Receiver<String>,
+    rx: &Receiver<String>,
     title: &str,
-) -> Result<Option<i32>, String> {
+    supervisor: &mut Supervisor<'_>,
+) -> Result<Outcome, String> {
     let mut app = App::new();
     let mut last_tick = Instant::now();
+    // Remembered because `try_wait()` only reports the status once, and the dashboard
+    // deliberately stays open after the child dies so the user can read the tail.
+    let mut child_exit: Option<Option<i32>> = None;
+    // A restart that could not spawn a replacement leaves nothing running; the
+    // dashboard stays open so the reason is readable, and the error surfaces on quit.
+    let mut restart_error: Option<String> = None;
 
     loop {
         terminal
-            .draw(|f| render(f, &app, title))
+            .draw(|f| render(f, &mut app, title))
             .map_err(|e| format!("Failed to draw TUI: {}", e))?;
 
         while let Ok(line) = rx.try_recv() {
@@ -436,69 +598,114 @@ fn event_loop(
         if app.running {
             if let Ok(Some(status)) = child.try_wait() {
                 app.running = false;
-                if app.should_quit {
-                    return Ok(status.code());
-                }
+                child_exit = Some(status.code());
                 // Keep the dashboard open so the user can see why it stopped instead
                 // of the window disappearing out from under them.
             }
         }
 
+        if app.restart_requested {
+            app.restart_requested = false;
+            app.notice("odx: restarting odoo-bin...");
+            // Draw once before the stop, which can block for the graceful timeout.
+            terminal
+                .draw(|f| render(f, &mut app, title))
+                .map_err(|e| format!("Failed to draw TUI: {}", e))?;
+
+            supervisor.note("=== odx: restart requested ===");
+            if stop_child(child) == StopResult::Forced {
+                app.notice("odx: odoo-bin did not stop gracefully, forced shutdown");
+            }
+
+            match supervisor.start() {
+                Ok(new_child) => {
+                    *child = new_child;
+                    app.running = true;
+                    app.restarts += 1;
+                    child_exit = None;
+                    restart_error = None;
+                    app.notice("odx: odoo-bin restarted");
+                }
+                Err(e) => {
+                    app.running = false;
+                    child_exit = None;
+                    app.notice(format!("odx: restart failed: {}", e));
+                    app.notice("odx: press 'r' to try again, 'q' to quit");
+                    restart_error = Some(e);
+                }
+            }
+        }
+
         if app.should_quit {
-            return Ok(None);
+            if let Some(e) = restart_error {
+                return Err(e);
+            }
+            return Ok(match child_exit {
+                Some(code) => Outcome::ChildExited { code },
+                None => Outcome::UserQuit,
+            });
         }
     }
 }
 
-/// Run the interactive log dashboard for a child process, taking ownership of it
-/// until the user quits (or the child exits on its own). The full, unfiltered log is
-/// always mirrored to `session_log_path` regardless of what's filtered on screen.
-pub fn run(
-    mut child: Child,
-    session_log_path: PathBuf,
-    title: String,
-    ui: &Ui,
-) -> Result<(), String> {
-    let stdout_pipe: ChildStdout = child
-        .stdout
-        .take()
-        .ok_or("Failed to capture odoo-bin stdout")?;
-    let stderr_pipe: ChildStderr = child
-        .stderr
-        .take()
-        .ok_or("Failed to capture odoo-bin stderr")?;
-
+/// Run the interactive log dashboard, taking ownership of the odoo-bin process until
+/// the user quits (or it exits on its own). `spawn` starts odoo-bin; it is called once
+/// up front and again for every restart requested with 'r', so anything that should be
+/// re-read on restart (the addons path, odoo.conf.local) belongs inside it. The full,
+/// unfiltered log of every start is mirrored to `session_log_path`.
+pub fn run<S>(mut spawn: S, session_log_path: PathBuf, title: String, ui: &Ui) -> Result<(), String>
+where
+    S: FnMut() -> Result<Child, String>,
+{
     let log_file = open_session_log(&session_log_path)?;
     let (tx, rx) = mpsc::channel::<String>();
-    spawn_reader(stdout_pipe, tx.clone(), Some(log_file.clone()));
-    spawn_reader(stderr_pipe, tx, Some(log_file));
+    let mut supervisor = Supervisor {
+        spawn: &mut spawn,
+        tx,
+        log: log_file,
+    };
 
-    let mut terminal = setup_terminal()?;
+    let mut child = supervisor.start()?;
+
+    // Installed before the terminal is touched so a panic inside `setup_terminal`
+    // itself still restores the screen.
     install_panic_hook();
+    let mut terminal = setup_terminal()?;
 
-    let outcome = event_loop(&mut terminal, &mut child, rx, &title);
+    let outcome = event_loop(&mut terminal, &mut child, &rx, &title, &mut supervisor);
+    // Kept as a value rather than `?`-ed: the child has to be stopped even when the
+    // terminal can no longer be restored, or odx exits leaving odoo-bin holding the
+    // HTTP port.
+    let restored = restore_terminal();
 
-    restore_terminal()?;
-
-    let already_exited = match outcome {
-        Ok(code) => code,
+    let outcome = match outcome {
+        Ok(outcome) => outcome,
         Err(e) => {
-            stop_child(&mut child, ui);
+            stop_child(&mut child);
             return Err(e);
         }
     };
 
-    if already_exited.is_none() {
+    if outcome == Outcome::UserQuit {
         ui.info(format!(
             "Stopping odoo-bin (full log: {})...",
             session_log_path.display()
         ));
     }
-    stop_child(&mut child, ui);
+    if stop_child(&mut child) == StopResult::Forced {
+        ui.warn("odoo-bin did not stop gracefully in time, forced shutdown");
+    }
+    restored?;
 
-    match already_exited {
-        Some(code) if code != 0 => Err(format!("odoo-bin exited with code {}", code)),
-        _ => Ok(()),
+    match outcome {
+        Outcome::UserQuit => Ok(()),
+        Outcome::ChildExited { code: Some(0) } => Ok(()),
+        Outcome::ChildExited { code: Some(code) } => {
+            Err(format!("odoo-bin exited with code {}", code))
+        }
+        Outcome::ChildExited { code: None } => {
+            Err("odoo-bin was terminated by a signal".to_string())
+        }
     }
 }
 
@@ -598,6 +805,97 @@ mod tests {
         let visible = buf.visible(LevelFilter::All, "MODULES");
         assert_eq!(visible.len(), 1);
         assert!(visible[0].raw.contains("Loading Modules"));
+    }
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn scrolling_up_is_clamped_to_the_last_rendered_maximum() {
+        let mut app = App::new();
+        app.max_scroll = 3;
+
+        for _ in 0..10 {
+            app.handle_key(key(KeyCode::Up));
+        }
+        assert_eq!(
+            app.scroll, 3,
+            "scroll must not run past the top of the buffer"
+        );
+
+        app.handle_key(key(KeyCode::Down));
+        assert_eq!(
+            app.scroll, 2,
+            "a single Down must move the view immediately"
+        );
+    }
+
+    #[test]
+    fn jump_to_top_then_scroll_down_moves_the_view() {
+        let mut app = App::new();
+        app.max_scroll = 5;
+
+        app.handle_key(key(KeyCode::Char('g')));
+        assert_eq!(app.scroll, 5);
+
+        app.handle_key(key(KeyCode::Char('j')));
+        assert_eq!(app.scroll, 4);
+
+        app.handle_key(key(KeyCode::Char('G')));
+        assert_eq!(app.scroll, 0);
+    }
+
+    #[test]
+    fn r_requests_a_restart_and_notices_survive_every_filter() {
+        let mut app = App::new();
+        app.handle_key(key(KeyCode::Char('r')));
+        assert!(app.restart_requested);
+        assert!(!app.should_quit, "restart must not end the session");
+
+        // A restart marker has to stay visible even when the view is filtered to
+        // errors only, otherwise the restart looks like nothing happened.
+        app.notice("odx: restarting odoo-bin...");
+        app.filter = LevelFilter::Error;
+        let visible = app.buffer.visible(app.filter, "");
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].level, LogLevel::Notice);
+    }
+
+    #[test]
+    fn r_typed_into_a_search_query_does_not_restart() {
+        let mut app = App::new();
+        app.handle_key(key(KeyCode::Char('/')));
+        app.handle_key(key(KeyCode::Char('r')));
+
+        assert!(!app.restart_requested);
+        assert_eq!(app.search_input.as_deref(), Some("r"));
+    }
+
+    #[test]
+    fn ctrl_c_quits_even_while_typing_a_search_query() {
+        let mut app = App::new();
+        app.handle_key(key(KeyCode::Char('/')));
+        app.handle_key(key(KeyCode::Char('a')));
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+
+        assert!(app.should_quit, "Ctrl+C must quit from search input too");
+        assert_eq!(
+            app.search_input.as_deref(),
+            Some("a"),
+            "Ctrl+C must not be typed into the query"
+        );
+    }
+
+    #[test]
+    fn modified_keys_are_not_typed_into_the_search_query() {
+        let mut app = App::new();
+        app.handle_key(key(KeyCode::Char('/')));
+        app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL));
+        app.handle_key(key(KeyCode::Char('x')));
+
+        assert_eq!(app.search_input.as_deref(), Some("x"));
     }
 
     #[test]

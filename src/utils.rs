@@ -90,7 +90,10 @@ pub fn find_python_command() -> Result<String, String> {
     which::which("python3")
         .or_else(|_| which::which("python"))
         .map(|p| p.to_string_lossy().to_string())
-        .map_err(|_| "Python not found. Please install Python or run 'odoo setup'".to_string())
+        .map_err(|_| {
+            "Python not found. Install Python 3.10+ and create the project venv (python3 -m venv .venv), then run 'odx install'."
+                .to_string()
+        })
 }
 
 pub fn ensure_venv() -> Result<(), String> {
@@ -102,7 +105,10 @@ pub fn ensure_venv() -> Result<(), String> {
     };
 
     if !venv_path.exists() {
-        return Err("Virtual environment not found. Run 'odoo setup' first.".to_string());
+        return Err(format!(
+            "Virtual environment not found at {}. Create it with 'python3 -m venv .venv' (or re-run 'odx new'), then run 'odx install'.",
+            venv_path.display()
+        ));
     }
 
     Ok(())
@@ -210,8 +216,48 @@ where
     )
 }
 
+/// Stream a child process line by line, failing on a non-zero exit.
+///
+/// Callers that need to tell "exited non-zero" apart from "terminated by a signal"
+/// (Ctrl+C is a normal way to stop a long-running server) should use
+/// [`execute_command_streaming_status`] instead.
 #[allow(clippy::too_many_arguments)]
 pub fn execute_command_streaming_with_env<F>(
+    program: &str,
+    args: &[&str],
+    working_dir: Option<&Path>,
+    envs: &[(&str, &str)],
+    on_line: F,
+    log_file: Option<&Path>,
+    odoo_log_file: Option<&Path>,
+    heartbeat: Option<Duration>,
+    heartbeat_message: &str,
+) -> Result<i32, String>
+where
+    F: FnMut(StreamSource, &str),
+{
+    match execute_command_streaming_status(
+        program,
+        args,
+        working_dir,
+        envs,
+        on_line,
+        log_file,
+        odoo_log_file,
+        heartbeat,
+        heartbeat_message,
+    )? {
+        Some(0) => Ok(0),
+        Some(code) => Err(format!("Command failed with exit code: {}", code)),
+        None => Err(format!("{} was terminated by a signal", program)),
+    }
+}
+
+/// Same as [`execute_command_streaming_with_env`], but reports how the child ended
+/// instead of deciding for the caller: `Some(code)` for a normal exit, `None` when the
+/// process was terminated by a signal.
+#[allow(clippy::too_many_arguments)]
+pub fn execute_command_streaming_status<F>(
     program: &str,
     args: &[&str],
     working_dir: Option<&Path>,
@@ -221,7 +267,7 @@ pub fn execute_command_streaming_with_env<F>(
     odoo_log_file: Option<&Path>,
     heartbeat: Option<Duration>,
     heartbeat_message: &str,
-) -> Result<i32, String>
+) -> Result<Option<i32>, String>
 where
     F: FnMut(StreamSource, &str),
 {
@@ -377,18 +423,8 @@ where
     let status = child
         .wait()
         .map_err(|e| format!("Failed to wait for {}: {}", program, e))?;
-    let code = status
-        .code()
-        .unwrap_or_else(|| if status.success() { 0 } else { 1 });
 
-    if !status.success() {
-        return Err(format!(
-            "Command failed with exit code: {:?}",
-            status.code()
-        ));
-    }
-
-    Ok(code)
+    Ok(status.code())
 }
 
 fn docker_compose_plugin_available() -> bool {
@@ -931,7 +967,11 @@ pub fn build_addons_path(project_root: &Path) -> Result<String, String> {
 
 /// Ensure odoo.conf.local exists (create from odoo.conf if not) and refresh addons_path
 /// with external_addons subdirs that have __manifest__.py.
-pub fn ensure_odoo_conf_local(project_root: &Path) -> Result<(), String> {
+/// Make sure `odoo.conf.local` exists and its `addons_path` matches the project's
+/// current addon layout. Returns the `addons_path` that was written so callers can
+/// pass it on the command line without rebuilding it (a directory scan plus a
+/// `canonicalize()` per addon root).
+pub fn ensure_odoo_conf_local(project_root: &Path) -> Result<String, String> {
     let local_path = project_root.join("odoo.conf.local");
     let base_path = project_root.join("odoo.conf");
 
@@ -974,7 +1014,7 @@ pub fn ensure_odoo_conf_local(project_root: &Path) -> Result<(), String> {
     };
     fs::write(&local_path, out).map_err(|e| format!("Failed to write odoo.conf.local: {}", e))?;
 
-    Ok(())
+    Ok(addons_path)
 }
 
 /// Detect Odoo version from project `src/odoo` (release.py or __init__.py).

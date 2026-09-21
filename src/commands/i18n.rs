@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 
 use crate::ui::Ui;
 use crate::utils::{
-    build_addons_path, ensure_odoo_conf_local, ensure_venv, execute_command, find_project_root,
-    find_python_command, project_addon_modules, require_odoo_bin, validate_db_name,
+    ensure_odoo_conf_local, ensure_venv, execute_command, find_project_root, find_python_command,
+    project_addon_modules, require_odoo_bin, validate_db_name,
 };
 
 const TEMPLATE_LANG: &str = "en_US";
@@ -19,9 +19,8 @@ pub fn execute(
     ensure_venv()?;
 
     let project_root = find_project_root()?;
-    ensure_odoo_conf_local(&project_root)?;
-
-    let addons_path = build_addons_path(&project_root)?;
+    // Also writes this addons_path into odoo.conf.local, so it's not recomputed here.
+    let addons_path = ensure_odoo_conf_local(&project_root)?;
 
     let python = find_python_command()?;
     let odoo_bin = require_odoo_bin(&project_root)?;

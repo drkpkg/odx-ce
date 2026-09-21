@@ -2,6 +2,7 @@ use console::{style, Term};
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use inquire::Confirm;
 use std::io;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,14 +31,22 @@ impl Default for UiConfig {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Ui {
     cfg: UiConfig,
+    /// `isatty` results are stable for the life of the process, so they are resolved
+    /// once instead of per message — `odx run` asks for them on every streamed log line.
+    stdout_tty: OnceLock<bool>,
+    stderr_tty: OnceLock<bool>,
 }
 
 impl Ui {
     pub fn new(cfg: UiConfig) -> Self {
-        Self { cfg }
+        Self {
+            cfg,
+            stdout_tty: OnceLock::new(),
+            stderr_tty: OnceLock::new(),
+        }
     }
 
     pub fn config(&self) -> &UiConfig {
@@ -45,11 +54,11 @@ impl Ui {
     }
 
     pub fn is_stdout_tty(&self) -> bool {
-        Term::stdout().is_term()
+        *self.stdout_tty.get_or_init(|| Term::stdout().is_term())
     }
 
     pub fn is_stderr_tty(&self) -> bool {
-        Term::stderr().is_term()
+        *self.stderr_tty.get_or_init(|| Term::stderr().is_term())
     }
 
     pub fn use_color(&self) -> bool {
@@ -69,6 +78,36 @@ impl Ui {
             return;
         }
         println!("{}", msg.as_ref());
+    }
+
+    /// Final, must-not-be-swallowed command output (a test summary, a result count).
+    /// Unlike [`Ui::info`] it survives `--quiet`; under `--json` it is suppressed and
+    /// the command is expected to emit a structured payload with [`Ui::json_line`].
+    pub fn summary(&self, msg: impl AsRef<str>) {
+        if self.cfg.json {
+            return;
+        }
+        println!("{}", msg.as_ref());
+    }
+
+    /// Emit one machine-readable JSON line on stdout. No-op unless `--json` is set, so
+    /// callers can keep the human and JSON paths side by side.
+    pub fn json_line(&self, value: &serde_json::Value) {
+        if !self.cfg.json {
+            return;
+        }
+        println!("{}", value);
+    }
+
+    /// Pass a line of child-process output straight through to stdout/stderr, already
+    /// formatted. The caller decides what `--quiet`/`--json` mean for that stream (see
+    /// `commands::run`), which is why this does no filtering of its own.
+    pub fn passthrough(&self, to_stderr: bool, msg: impl AsRef<str>) {
+        if to_stderr {
+            eprintln!("{}", msg.as_ref());
+        } else {
+            println!("{}", msg.as_ref());
+        }
     }
 
     pub fn warn(&self, msg: impl AsRef<str>) {

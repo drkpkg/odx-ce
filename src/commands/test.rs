@@ -28,7 +28,9 @@ pub fn execute(
     ensure_venv()?;
 
     let project_root = find_project_root()?;
-    ensure_odoo_conf_local(&project_root)?;
+    // The addons_path it returns is already written into odoo.conf.local, which the
+    // test run passes with -c.
+    let _ = ensure_odoo_conf_local(&project_root)?;
 
     let python = find_python_command()?;
 
@@ -336,15 +338,19 @@ fn run_one_selector(
         log_level_arg.as_str(),
     ];
 
+    // Raw odoo-bin output is a passthrough stream, so it honors --quiet/--json here
+    // rather than inside `Ui`: under either flag it is suppressed and only the session
+    // artifacts (combined.log, runs/*.log) keep the full log.
+    let echo_output = !ui.config().json && !ui.config().quiet;
+
     let result = execute_command_streaming_with_env(
         python,
         &args,
         Some(project_root),
         envs,
         |src, line| {
-            match src {
-                StreamSource::Stdout | StreamSource::LogFile => println!("{}", line),
-                StreamSource::Stderr => eprintln!("{}", line),
+            if echo_output {
+                ui.passthrough(matches!(src, StreamSource::Stderr), line);
             }
             parser.ingest(line);
             if let Some(file) = run_log_file.as_mut() {
@@ -920,36 +926,66 @@ fn print_summary(
     let total = runs.len();
     let passed = runs.iter().filter(|r| r.passed).count();
     let failed = total - passed;
+    let total_skipped: u32 = runs.iter().filter_map(|r| r.skipped).sum();
+    let have_skipped = runs.iter().any(|r| r.skipped.is_some());
 
+    if ui.config().json {
+        ui.json_line(&summary_json(
+            runs,
+            warnings,
+            session,
+            have_skipped.then_some(total_skipped),
+        ));
+        return;
+    }
+
+    // Pass/fail counts are the point of the command, so they survive `--quiet`; the
+    // rest of the block doesn't.
+    if ui.config().quiet {
+        ui.summary(format!(
+            "Test summary: {} run(s), {} passed, {} failed",
+            total, passed, failed
+        ));
+        for r in runs.iter().filter(|r| !r.passed) {
+            let log = if r.log_file.is_empty() {
+                String::new()
+            } else {
+                format!(" (log: {})", r.log_file)
+            };
+            ui.summary(format!("FAILED {}{}", r.selector, log));
+        }
+        return;
+    }
+
+    // Everything below goes to stdout, failures included: a summary split across
+    // stdout and stderr gets shredded by redirection and by `2>&1 | less`.
     ui.info("");
     ui.info("================= Test Summary =================");
     ui.info(format!("Total runs: {}", total));
     ui.info(format!("Passed: {}", passed));
     ui.info(format!("Failed: {}", failed));
 
-    let total_skipped: u32 = runs.iter().filter_map(|r| r.skipped).sum();
-    let have_skipped = runs.iter().any(|r| r.skipped.is_some());
     if have_skipped {
         ui.info(format!("Skipped (parsed): {}", total_skipped));
     }
 
     if failed > 0 {
-        ui.warn("");
-        ui.warn("Failures:");
+        ui.info("");
+        ui.info("Failures:");
         for r in runs.iter().filter(|r| !r.passed) {
-            ui.warn(format!(
+            ui.info(format!(
                 "- {} (ran={:?}, failures={:?}, errors={:?}, skipped={:?})",
                 r.selector, r.ran_tests, r.failures, r.errors, r.skipped
             ));
             if !r.log_file.is_empty() {
-                ui.warn(format!("  log: {}", r.log_file));
+                ui.info(format!("  log: {}", r.log_file));
             }
             if let Some(err) = &r.exit_error {
-                ui.warn(format!("  exit: {}", err));
+                ui.info(format!("  exit: {}", err));
             }
             if let Some(block) = r.failure_blocks.first() {
                 let preview: String = block.lines().take(8).collect::<Vec<_>>().join("\n");
-                ui.warn(format!(
+                ui.info(format!(
                     "  failure preview:\n{}",
                     indent_lines(&preview, "    ")
                 ));
@@ -984,6 +1020,33 @@ fn print_summary(
     }
 
     ui.info("================================================");
+}
+
+/// The `--json` form of the summary: the same numbers the human block prints, plus the
+/// per-run detail and where the artifacts landed.
+fn summary_json(
+    runs: &[TagRunResult],
+    warnings: &BTreeSet<String>,
+    session: Option<&TestSession>,
+    skipped: Option<u32>,
+) -> serde_json::Value {
+    let passed = runs.iter().filter(|r| r.passed).count();
+    serde_json::json!({
+        "command": "test",
+        "total_runs": runs.len(),
+        "passed": passed,
+        "failed": runs.len() - passed,
+        "skipped": skipped,
+        "warnings_unique": warnings.len(),
+        "session": session.map(|s| serde_json::json!({
+            "run_id": s.run_id,
+            "dir": s.dir.display().to_string(),
+            "report": s.dir.join("report.json").display().to_string(),
+            "combined_log": s.combined_log.display().to_string(),
+            "warnings_log": s.warnings_log.display().to_string(),
+        })),
+        "runs": runs,
+    })
 }
 
 fn indent_lines(text: &str, prefix: &str) -> String {
@@ -1058,6 +1121,40 @@ mod tests {
         let specs = normalize_specs(&["intn,/partner_vat_unique:TestX.test_y".to_string()]);
         assert_eq!(specs, vec!["intn,/partner_vat_unique:TestX.test_y"]);
         assert_eq!(specs.join(","), "intn,/partner_vat_unique:TestX.test_y");
+    }
+
+    fn run_result(selector: &str, passed: bool) -> TagRunResult {
+        TagRunResult {
+            selector: selector.to_string(),
+            passed,
+            exit_error: (!passed).then(|| "exit 1".to_string()),
+            ran_tests: Some(3),
+            failures: (!passed).then_some(1),
+            errors: None,
+            skipped: Some(2),
+            log_file: format!("runs/{}.log", selector),
+            failure_blocks: vec![],
+            warnings: vec![],
+        }
+    }
+
+    #[test]
+    fn summary_json_reports_counts_and_every_run() {
+        let runs = vec![run_result("mod_a", true), run_result("mod_b", false)];
+        let warnings = BTreeSet::from(["deprecated field".to_string()]);
+
+        let payload = summary_json(&runs, &warnings, None, Some(4));
+
+        assert_eq!(payload["command"], "test");
+        assert_eq!(payload["total_runs"], 2);
+        assert_eq!(payload["passed"], 1);
+        assert_eq!(payload["failed"], 1);
+        assert_eq!(payload["skipped"], 4);
+        assert_eq!(payload["warnings_unique"], 1);
+        assert!(payload["session"].is_null());
+        assert_eq!(payload["runs"].as_array().unwrap().len(), 2);
+        assert_eq!(payload["runs"][1]["selector"], "mod_b");
+        assert_eq!(payload["runs"][1]["passed"], false);
     }
 
     #[test]

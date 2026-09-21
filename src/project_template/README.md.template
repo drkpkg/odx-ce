@@ -1,6 +1,6 @@
-# {{{project_name}}}
+# {{project_name}}
 
-Odoo {{{version}}} project
+Odoo {{version}} project
 
 ## Setup
 
