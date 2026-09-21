@@ -6,6 +6,7 @@ pub mod install;
 pub mod new;
 pub mod run;
 pub mod shell;
+pub mod store;
 pub mod sync;
 pub mod test;
 pub mod update;

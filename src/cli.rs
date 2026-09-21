@@ -50,11 +50,17 @@ impl From<CliColor> for ColorMode {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Run Odoo server
+    /// Run Odoo server (always debuggable: a DAP listener is started for it)
     Run {
         /// Skip the live log dashboard and stream plain (level-colored) log lines instead
         #[arg(long, default_value_t = false)]
         plain: bool,
+        /// Port for the debugger (DAP) listener on 127.0.0.1. Default: 5678, or the next free port
+        #[arg(long)]
+        debug_port: Option<u16>,
+        /// Do not start Odoo until a debug client attaches
+        #[arg(long, default_value_t = false)]
+        debug_wait: bool,
     },
 
     /// Update all Odoo modules
@@ -78,6 +84,9 @@ pub enum Commands {
         /// Database name
         #[arg(short, long)]
         database: String,
+        /// Port for the debugger (DAP) listener on 127.0.0.1. Default: 5678, or the next free port
+        #[arg(long)]
+        debug_port: Option<u16>,
     },
 
     /// Database operations
@@ -113,13 +122,23 @@ pub enum Commands {
         /// Odoo log level for the test run (e.g. info, warn, error, debug)
         #[arg(long, default_value = "warn")]
         odoo_log_level: String,
+        /// Port for the debugger (DAP) listener on 127.0.0.1. Default: 5678, or the next free port
+        #[arg(long)]
+        debug_port: Option<u16>,
+        /// Do not start the test run until a debug client attaches
+        #[arg(long, default_value_t = false)]
+        debug_wait: bool,
     },
 
     /// Install/update Python dependencies
     Install,
 
-    /// Sync Odoo source (git pull in src/odoo)
+    /// Sync Odoo source (git pull in the shared store checkout for this project)
     Sync,
+
+    /// Manage the shared Odoo store that projects point at
+    #[command(subcommand)]
+    Store(commands::store::StoreCommands),
 
     /// Clean temporary files
     Clean,
@@ -150,12 +169,19 @@ impl Cli {
         });
 
         let result = match self.command {
-            Commands::Run { plain } => commands::run::execute(&ui, plain),
+            Commands::Run {
+                plain,
+                debug_port,
+                debug_wait,
+            } => commands::run::execute(&ui, plain, debug_port, debug_wait),
             Commands::Update { database } => commands::update::execute(&ui, &database),
             Commands::UpdateModule { module, database } => {
                 commands::update_module::execute(&ui, &module, &database)
             }
-            Commands::Shell { database } => commands::shell::execute(&ui, &database),
+            Commands::Shell {
+                database,
+                debug_port,
+            } => commands::shell::execute(&ui, &database, debug_port),
             Commands::Db(cmd) => commands::db::execute(&ui, cmd),
             Commands::I18n {
                 database,
@@ -168,6 +194,8 @@ impl Cli {
                 log_file,
                 no_log_file,
                 odoo_log_level,
+                debug_port,
+                debug_wait,
             } => commands::test::execute(
                 &ui,
                 &tags,
@@ -175,9 +203,12 @@ impl Cli {
                 log_file.as_deref(),
                 no_log_file,
                 &odoo_log_level,
+                debug_port,
+                debug_wait,
             ),
             Commands::Install => commands::install::execute(&ui),
             Commands::Sync => commands::sync::execute(&ui),
+            Commands::Store(cmd) => commands::store::execute(&ui, cmd),
             Commands::Clean => commands::clean::execute(&ui),
             Commands::New {
                 project_name,

@@ -23,7 +23,8 @@ Odoo {{version}} project
 
 - `custom_addons/` - Custom Odoo modules
 - `external_addons/` - External Odoo modules (OCA, etc.)
-- `src/odoo/` - Odoo core (git submodule)
+- `.odx.toml` - Odoo version this project targets (the source itself is shared, see `odx store ls`)
+- `AGENTS.md` / `CLAUDE.md` - Briefing for AI agents working in this project
 - `docs/` - Project documentation
 - `scripts/` - Project-specific helper scripts (not used by odx CLI)
 

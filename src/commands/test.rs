@@ -1,4 +1,5 @@
 use crate::commands::db::drop_db;
+use crate::debug;
 use crate::ui::Ui;
 use crate::utils::{
     ensure_odoo_conf_local, ensure_venv, execute_command_streaming_with_env,
@@ -17,6 +18,7 @@ use std::sync::{
 };
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+#[allow(clippy::too_many_arguments)]
 pub fn execute(
     ui: &Ui,
     tags: &[String],
@@ -24,6 +26,8 @@ pub fn execute(
     log_file: Option<&str>,
     no_log_file: bool,
     odoo_log_level: &str,
+    debug_port: Option<u16>,
+    debug_wait: bool,
 ) -> Result<(), String> {
     ensure_venv()?;
 
@@ -74,6 +78,19 @@ pub fn execute(
     if let Some(path) = &path_env {
         envs.push(("PATH", path.as_str()));
     }
+
+    // Tests are debuggable like everything else odx launches; --debug-wait holds the
+    // run until a client attaches, which is how you catch a failing test at the top.
+    let (debug_setup, shim_dir) = debug::prepare(&project_root, debug_port, debug_wait)?;
+    if debug::is_available(&python) {
+        ui.info(format!("Debugger (DAP) on {}", debug_setup.address()));
+    } else {
+        ui.warn(
+            "debugpy is not installed in .venv; running without a debugger (run 'odx install')",
+        );
+    }
+    let debug_env = debug_setup.env(&shim_dir, &odoo_bin);
+    envs.extend(debug_env.iter().map(|(k, v)| (k.as_str(), v.as_str())));
 
     // Always attempt to drop the temporary database.
     let dropped = Arc::new(AtomicBool::new(false));

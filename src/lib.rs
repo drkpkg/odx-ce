@@ -1,6 +1,8 @@
 pub mod cli;
 pub mod commands;
+pub mod debug;
 pub mod install_guide;
+pub mod odoo_source;
 pub mod os_context;
 pub mod tui;
 pub mod ui;

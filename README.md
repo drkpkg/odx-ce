@@ -60,11 +60,39 @@ Los scripts dejan los artefactos en `dist/`:
 - `odx test [<tags>...]`
 - `odx install`
 - `odx sync`
+- `odx store ls|path|add <version>|rm <version>`
 - `odx clean`
 - `odx new <project> -v <version> [--cd]`
 - `odx doctor`
 
 Opción global: `--python <version>` (por ejemplo `3.11`).
+
+### Fuente de Odoo compartida
+
+El código de Odoo **no** se copia dentro de cada proyecto: odx mantiene una copia por
+versión en `~/.cache/odx/odoo/<version>` y todos los proyectos apuntan ahí. Un proyecto
+nuevo pesa kilobytes en vez de ~1.2 GB, y crear el segundo proyecto de una versión ya
+descargada no usa red.
+
+- `.odx.toml` en el proyecto fija la versión (`[odoo] version = "18.0"`).
+- `odx store ls` lista las versiones; `odx store path` imprime la ruta en uso.
+- `odx install` descarga la versión del proyecto si falta (útil tras clonar el repo).
+- `odx sync` actualiza esa copia compartida: afecta a todos los proyectos de esa versión.
+- `ODX_ODOO_STORE` cambia la ubicación del store; `ODX_ODOO_PATH` o `[odoo] path` en
+  `.odx.toml` fuerzan un checkout concreto.
+- Los proyectos antiguos con `src/odoo` siguen funcionando tal cual.
+
+### Depuración (DAP)
+
+`odx run`, `odx test` y `odx shell` inician Odoo siempre con un listener DAP
+(debugpy) en `127.0.0.1:5678`: no hace falta ninguna opción para activarlo. Se
+conecta cualquier cliente DAP (VS Code/Cursor, nvim-dap); `odx new` genera
+`.vscode/launch.json` con la configuración de attach.
+
+- `--debug-port <N>`: cambia el puerto (si está ocupado, odx usa el siguiente libre).
+- `--debug-wait`: no arranca hasta que un cliente se conecte (`run` y `test`).
+- `breakpoint()` en el código del addon rompe en el cliente conectado; sin cliente
+  conectado no hace nada.
 
 Ejemplos típicos:
 

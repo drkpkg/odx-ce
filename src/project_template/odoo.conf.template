@@ -12,8 +12,9 @@ http_interface = 0.0.0.0
 ; Uncomment the line below if you want to set a specific port
 ; http_port = 8069
 
-; Addons paths (custom_addons, external_addons created empty; Odoo skips invalid dirs)
-addons_path = custom_addons,external_addons,src/odoo/addons
+; Addons paths. odx rewrites this line in odoo.conf.local with absolute paths,
+; including the Odoo core addons from the shared store ('odx store path').
+addons_path = custom_addons,external_addons
 
 ; Logging (Odoo 19+: use empty or omit, not False)
 logfile =

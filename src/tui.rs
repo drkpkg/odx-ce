@@ -1,6 +1,9 @@
 use crate::ui::Ui;
 use console::style;
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
+    KeyModifiers, MouseEvent, MouseEventKind,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -23,6 +26,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 const MAX_LINES: usize = 10_000;
+/// Lines moved per wheel notch.
+const SCROLL_STEP: usize = 3;
 const TICK: Duration = Duration::from_millis(150);
 const GRACEFUL_STOP_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -219,7 +224,15 @@ struct App {
     /// date so key handling can clamp instead of letting `scroll` run away past the
     /// top of the buffer (which would make Down/'j' inert until it counted back down).
     max_scroll: usize,
+    /// Visible log rows in the last rendered frame, for PageUp/PageDown.
+    body_height: usize,
     should_quit: bool,
+    /// Whether wheel events are captured. Capturing them costs the terminal's own
+    /// selection (most emulators then need Shift held to select text), so 'm' hands
+    /// the mouse back when the user wants to copy a stack trace.
+    mouse_capture: bool,
+    /// Set by 'm'; the event loop applies it, since it talks to the terminal.
+    toggle_mouse: bool,
     /// Set by the 'r' key; the event loop performs the restart (it owns the child).
     restart_requested: bool,
     restarts: usize,
@@ -240,7 +253,10 @@ impl App {
             search_input: None,
             scroll: 0,
             max_scroll: 0,
+            body_height: 0,
             should_quit: false,
+            mouse_capture: true,
+            toggle_mouse: false,
             restart_requested: false,
             restarts: 0,
             running: true,
@@ -289,14 +305,38 @@ impl App {
             KeyCode::Char('l') => self.filter = self.filter.next(),
             KeyCode::Char('/') => self.search_input = Some(String::new()),
             KeyCode::Esc => self.search_query.clear(),
+            KeyCode::Char('m') => self.toggle_mouse = true,
             KeyCode::Char('g') => self.scroll = self.max_scroll,
             KeyCode::Char('G') => self.scroll = 0,
-            KeyCode::Up | KeyCode::Char('k') => {
-                self.scroll = self.scroll.saturating_add(1).min(self.max_scroll)
-            }
-            KeyCode::Down | KeyCode::Char('j') => self.scroll = self.scroll.saturating_sub(1),
+            KeyCode::Up | KeyCode::Char('k') => self.scroll_up(1),
+            KeyCode::Down | KeyCode::Char('j') => self.scroll_down(1),
+            KeyCode::PageUp => self.scroll_up(self.page()),
+            KeyCode::PageDown => self.scroll_down(self.page()),
             _ => {}
         }
+    }
+
+    fn handle_mouse(&mut self, ev: MouseEvent) {
+        match ev.kind {
+            MouseEventKind::ScrollUp => self.scroll_up(SCROLL_STEP),
+            MouseEventKind::ScrollDown => self.scroll_down(SCROLL_STEP),
+            _ => {}
+        }
+    }
+
+    /// Scroll back towards older lines, never past the top of the buffer.
+    fn scroll_up(&mut self, lines: usize) {
+        self.scroll = self.scroll.saturating_add(lines).min(self.max_scroll);
+    }
+
+    /// Scroll towards the tail; 0 re-pins the view to the newest line.
+    fn scroll_down(&mut self, lines: usize) {
+        self.scroll = self.scroll.saturating_sub(lines);
+    }
+
+    /// One screenful, as of the last rendered frame.
+    fn page(&self) -> usize {
+        self.body_height.max(1)
     }
 
     /// Append a line from odx itself to the on-screen buffer.
@@ -327,6 +367,7 @@ fn render(frame: &mut Frame, app: &mut App, title: &str) {
     let body_height = body_area.height.saturating_sub(2) as usize;
     let max_scroll = visible.len().saturating_sub(body_height);
     app.max_scroll = max_scroll;
+    app.body_height = body_height;
     // Clamp the stored value, not just this frame's copy: a filter change or evicted
     // lines can shrink the buffer under a scrolled-up view.
     app.scroll = app.scroll.min(max_scroll);
@@ -339,11 +380,13 @@ fn render(frame: &mut Frame, app: &mut App, title: &str) {
         .map(|l| Line::styled(l.raw.clone(), Style::default().fg(l.level.color())))
         .collect();
 
-    let keybinds = "[q]uit [r]estart [/]search [l]evel [g/G]top/bottom";
-    let block = Block::default()
+    let keybinds = keybind_hint(body_area.width, title.chars().count());
+    let mut block = Block::default()
         .borders(Borders::ALL)
-        .title(Line::from(format!(" {} ", title)))
-        .title(Line::from(format!(" {} ", keybinds)).right_aligned());
+        .title(Line::from(format!(" {} ", title)));
+    if !keybinds.is_empty() {
+        block = block.title(Line::from(format!(" {} ", keybinds)).right_aligned());
+    }
 
     frame.render_widget(Paragraph::new(Text::from(lines)).block(block), body_area);
 
@@ -360,13 +403,30 @@ fn render(frame: &mut Frame, app: &mut App, title: &str) {
         } else {
             Span::styled("stopped", Style::default().fg(Color::Red))
         };
+        // Scrolled-up views stop following the tail while lines keep arriving; say so,
+        // otherwise the dashboard just looks frozen.
+        let follow = if app.scroll == 0 {
+            Span::raw("")
+        } else {
+            Span::styled(
+                format!("   paused -{} lines ([G] to resume)", app.scroll),
+                Style::default().fg(Color::Yellow),
+            )
+        };
         let mut spans = vec![
             Span::raw(format!("filter: [{}]", app.filter.label())),
             Span::raw(format!("   {:.1} lines/s", app.rate)),
             Span::raw(format!("   uptime {}s", app.start.elapsed().as_secs())),
             Span::raw("   "),
             indicator,
+            follow,
         ];
+        if !app.mouse_capture {
+            spans.push(Span::styled(
+                "   mouse: off",
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
         if app.restarts > 0 {
             spans.push(Span::raw(format!("   restarts: {}", app.restarts)));
         }
@@ -378,13 +438,30 @@ fn render(frame: &mut Frame, app: &mut App, title: &str) {
     frame.render_widget(Paragraph::new(status_line), status_area);
 }
 
+/// Longest keybind hint that still leaves room for the project title. Narrow
+/// terminals used to get a hint that ate the title and was itself clipped mid-word.
+fn keybind_hint(width: u16, title_len: usize) -> &'static str {
+    const HINTS: [&str; 4] = [
+        "[q]uit [r]estart [/]search [l]evel [m]ouse [g/G]top/bottom",
+        "[q]uit [r]estart [/]search [l]evel",
+        "[q]uit [r]estart",
+        "",
+    ];
+    // 2 borders + the spaces padding each title.
+    let available = (width as usize).saturating_sub(title_len + 6);
+    HINTS
+        .into_iter()
+        .find(|h| h.chars().count() <= available)
+        .unwrap_or("")
+}
+
 fn setup_terminal() -> Result<Terminal<CrosstermBackend<io::Stdout>>, String> {
     enable_raw_mode().map_err(|e| format!("Failed to enable raw mode: {}", e))?;
     // From here on every failure path has to undo raw mode (and the alternate screen)
     // before returning, or odx exits leaving the user with a terminal that no longer
     // echoes input.
     let mut stdout = io::stdout();
-    if let Err(e) = execute!(stdout, EnterAlternateScreen) {
+    if let Err(e) = execute!(stdout, EnterAlternateScreen, EnableMouseCapture) {
         restore_terminal_best_effort();
         return Err(format!("Failed to enter alternate screen: {}", e));
     }
@@ -396,14 +473,27 @@ fn setup_terminal() -> Result<Terminal<CrosstermBackend<io::Stdout>>, String> {
 
 fn restore_terminal() -> Result<(), String> {
     disable_raw_mode().map_err(|e| format!("Failed to disable raw mode: {}", e))?;
-    execute!(io::stdout(), LeaveAlternateScreen)
+    execute!(io::stdout(), DisableMouseCapture, LeaveAlternateScreen)
         .map_err(|e| format!("Failed to leave alternate screen: {}", e))?;
     Ok(())
 }
 
 fn restore_terminal_best_effort() {
     let _ = disable_raw_mode();
-    let _ = execute!(io::stdout(), LeaveAlternateScreen);
+    let _ = execute!(io::stdout(), DisableMouseCapture, LeaveAlternateScreen);
+}
+
+/// Hand the mouse to the terminal (so the user can select and copy text) or take it
+/// back for wheel scrolling.
+fn set_mouse_capture(enabled: bool) -> Result<(), String> {
+    let mut stdout = io::stdout();
+    if enabled {
+        execute!(stdout, EnableMouseCapture)
+            .map_err(|e| format!("Failed to enable mouse capture: {}", e))
+    } else {
+        execute!(stdout, DisableMouseCapture)
+            .map_err(|e| format!("Failed to disable mouse capture: {}", e))
+    }
 }
 
 fn install_panic_hook() {
@@ -583,12 +673,27 @@ fn event_loop(
 
         let timeout = TICK.saturating_sub(last_tick.elapsed());
         if event::poll(timeout).map_err(|e| format!("Failed to poll input: {}", e))? {
-            if let Event::Key(key) =
-                event::read().map_err(|e| format!("Failed to read input: {}", e))?
-            {
-                if key.kind == KeyEventKind::Press {
-                    app.handle_key(key);
+            match event::read().map_err(|e| format!("Failed to read input: {}", e))? {
+                Event::Key(key) if key.kind == KeyEventKind::Press => app.handle_key(key),
+                Event::Mouse(mouse) => app.handle_mouse(mouse),
+                _ => {}
+            }
+        }
+
+        if app.toggle_mouse {
+            app.toggle_mouse = false;
+            let wanted = !app.mouse_capture;
+            match set_mouse_capture(wanted) {
+                Ok(()) => {
+                    app.mouse_capture = wanted;
+                    app.notice(if wanted {
+                        "odx: mouse capture on (wheel scrolls the log)"
+                    } else {
+                        "odx: mouse capture off (terminal selection restored)"
+                    });
                 }
+                // Not fatal — the dashboard is still usable from the keyboard.
+                Err(e) => app.notice(format!("odx: {}", e)),
             }
         }
         if last_tick.elapsed() >= TICK {
@@ -844,6 +949,92 @@ mod tests {
 
         app.handle_key(key(KeyCode::Char('G')));
         assert_eq!(app.scroll, 0);
+    }
+
+    #[test]
+    fn keybind_hint_shrinks_before_it_eats_the_title() {
+        let title = "odx run — my_project (Odoo 18.0)".chars().count();
+
+        assert!(keybind_hint(160, title).contains("[m]ouse"));
+        assert!(keybind_hint(100, title).starts_with("[q]uit [r]estart"));
+        assert_eq!(keybind_hint(40, title), "", "no room: title wins");
+
+        for width in [40u16, 60, 80, 100, 120, 160] {
+            let hint = keybind_hint(width, title);
+            assert!(
+                hint.chars().count() + title + 6 <= width as usize || hint.is_empty(),
+                "hint {hint:?} does not fit in {width} columns"
+            );
+        }
+    }
+
+    fn wheel(kind: MouseEventKind) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column: 10,
+            row: 5,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn wheel_scrolls_by_a_step_and_stops_at_both_ends() {
+        let mut app = App::new();
+        app.max_scroll = 10;
+
+        app.handle_mouse(wheel(MouseEventKind::ScrollUp));
+        assert_eq!(app.scroll, SCROLL_STEP);
+
+        app.handle_mouse(wheel(MouseEventKind::ScrollDown));
+        assert_eq!(app.scroll, 0, "back to the tail");
+
+        for _ in 0..20 {
+            app.handle_mouse(wheel(MouseEventKind::ScrollUp));
+        }
+        assert_eq!(app.scroll, 10, "must not scroll past the oldest line");
+
+        for _ in 0..20 {
+            app.handle_mouse(wheel(MouseEventKind::ScrollDown));
+        }
+        assert_eq!(app.scroll, 0, "must re-pin to the newest line");
+    }
+
+    #[test]
+    fn other_mouse_events_do_not_move_the_view() {
+        let mut app = App::new();
+        app.max_scroll = 10;
+        app.scroll = 4;
+
+        app.handle_mouse(wheel(MouseEventKind::Moved));
+
+        assert_eq!(app.scroll, 4);
+    }
+
+    #[test]
+    fn page_keys_scroll_by_the_rendered_height() {
+        let mut app = App::new();
+        app.max_scroll = 100;
+        app.body_height = 20;
+
+        app.handle_key(key(KeyCode::PageUp));
+        assert_eq!(app.scroll, 20);
+
+        app.handle_key(key(KeyCode::PageDown));
+        assert_eq!(app.scroll, 0);
+    }
+
+    #[test]
+    fn m_requests_a_mouse_capture_toggle() {
+        let mut app = App::new();
+        assert!(app.mouse_capture, "wheel scrolling is on by default");
+
+        app.handle_key(key(KeyCode::Char('m')));
+
+        assert!(app.toggle_mouse);
+        assert!(
+            app.mouse_capture,
+            "the event loop applies it, so state flips only once the terminal agrees"
+        );
     }
 
     #[test]

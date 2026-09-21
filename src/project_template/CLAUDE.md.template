@@ -1,0 +1,8 @@
+# CLAUDE.md
+
+Guidance for Claude Code (claude.ai/code) working in this Odoo {{version}} project.
+
+The briefing is kept in a single file so every agent reads the same thing; it is
+imported here rather than duplicated:
+
+@AGENTS.md

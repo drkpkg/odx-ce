@@ -1,7 +1,9 @@
+use crate::debug;
+use crate::odoo_source;
 use crate::ui::Ui;
 use crate::utils::{
-    check_command_exists, create_project_structure, create_venv, execute_command,
-    generate_from_template, resolve_python,
+    check_command_exists, create_project_structure, create_venv, generate_from_template,
+    resolve_python,
 };
 use regex::Regex;
 use std::collections::HashMap;
@@ -9,7 +11,7 @@ use std::fs;
 use std::path::Path;
 
 pub fn execute(
-    _ui: &Ui,
+    ui: &Ui,
     project_name: &str,
     version: &str,
     cd_into: bool,
@@ -34,11 +36,16 @@ pub fn execute(
         .map_err(|e| format!("Failed to resolve project path: {}", e))?;
     create_project_structure(&project_path)?;
 
-    out(&format!("Cloning Odoo {}...", version));
-    clone_odoo_repo(version, &project_path)?;
+    // The Odoo source is not copied into the project: it is fetched once per version
+    // into the shared store, so a second project on the same version costs nothing and
+    // needs no network.
+    let odoo_path = odoo_source::ensure_in_store(ui, version)?;
+    out(&format!("Odoo {}: {}", version, odoo_path.display()));
 
     out("Generating configuration files...");
+    odoo_source::write_project_config(&project_path, version)?;
     generate_config_files(&project_path, project_name, version)?;
+    generate_agent_access_config(&project_path, &odoo_path)?;
 
     out("Setting up Python environment...");
     match resolve_python(python_version) {
@@ -111,38 +118,6 @@ fn check_prerequisites(python_version: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn clone_odoo_repo(version: &str, project_path: &Path) -> Result<(), String> {
-    let odoo_path = project_path.join("src/odoo");
-    if odoo_path.exists() {
-        // If the directory already exists and is non-empty, assume Odoo is already present
-        // (e.g. created by a previous run) and avoid destructive removal.
-        let is_empty = fs::read_dir(&odoo_path)
-            .map_err(|e| format!("Failed to read existing src/odoo: {}", e))?
-            .next()
-            .is_none();
-        if is_empty {
-            // `git clone` refuses to clone into an existing directory, even if empty.
-            fs::remove_dir(&odoo_path)
-                .map_err(|e| format!("Failed to remove empty src/odoo: {}", e))?;
-        } else {
-            return Ok(());
-        }
-    }
-    execute_command(
-        "git",
-        &[
-            "clone",
-            "--branch",
-            version,
-            "--depth",
-            "1",
-            "https://github.com/odoo/odoo.git",
-            "src/odoo",
-        ],
-        Some(project_path),
-    )
-}
-
 fn generate_config_files(
     project_path: &Path,
     project_name: &str,
@@ -176,5 +151,171 @@ fn generate_config_files(
     fs::write(project_path.join("AGENTS.md"), agents_content)
         .map_err(|e| format!("Failed to create AGENTS.md: {}", e))?;
 
+    // Generate CLAUDE.md. It imports AGENTS.md instead of repeating it: Claude Code
+    // reads CLAUDE.md, other agents read AGENTS.md, and there is only one file to keep
+    // current.
+    let claude_template = include_str!("../project_template/CLAUDE.md.template");
+    let claude_content = generate_from_template(claude_template, &vars);
+    fs::write(project_path.join("CLAUDE.md"), claude_content)
+        .map_err(|e| format!("Failed to create CLAUDE.md: {}", e))?;
+
+    generate_debug_config(project_path)?;
+
+    // Worth having now that the project is small enough to commit: Odoo's source is no
+    // longer sitting inside it as a 1.2 GB nested repository.
+    let gitignore = project_path.join(".gitignore");
+    if !gitignore.exists() {
+        fs::write(
+            &gitignore,
+            include_str!("../project_template/gitignore.template"),
+        )
+        .map_err(|e| format!("Failed to create .gitignore: {}", e))?;
+    }
+
     Ok(())
+}
+
+/// Grant agents read access to the Odoo source. It lives outside the project now, and
+/// agent tools refuse paths outside the working directory, so a project that does not
+/// declare it leaves the agent unable to read the framework it is writing against.
+fn generate_agent_access_config(project_path: &Path, odoo_path: &Path) -> Result<(), String> {
+    let claude_dir = project_path.join(".claude");
+    let settings = claude_dir.join("settings.json");
+    if settings.exists() {
+        return Ok(());
+    }
+
+    fs::create_dir_all(&claude_dir)
+        .map_err(|e| format!("Failed to create .claude directory: {}", e))?;
+
+    let body = format!(
+        r#"{{
+  "permissions": {{
+    "additionalDirectories": [
+      "{}"
+    ]
+  }}
+}}
+"#,
+        odoo_path.to_string_lossy().replace('\\', "\\\\")
+    );
+    fs::write(&settings, body).map_err(|e| format!("Failed to create .claude/settings.json: {}", e))
+}
+
+/// VS Code / Cursor attach configuration, so `odx run` + F5 debugs out of the box.
+/// Never overwrites an existing launch.json.
+fn generate_debug_config(project_path: &Path) -> Result<(), String> {
+    let vscode_dir = project_path.join(".vscode");
+    let launch_json = vscode_dir.join("launch.json");
+    if launch_json.exists() {
+        return Ok(());
+    }
+
+    fs::create_dir_all(&vscode_dir)
+        .map_err(|e| format!("Failed to create .vscode directory: {}", e))?;
+
+    let setup = debug::DebugSetup {
+        host: debug::HOST.to_string(),
+        port: debug::DEFAULT_PORT,
+        wait: false,
+    };
+    fs::write(&launch_json, debug::launch_json(&setup))
+        .map_err(|e| format!("Failed to create .vscode/launch.json: {}", e))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_dir(label: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "odx-new-{}-{}-{:?}",
+            label,
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn generated_project_briefs_agents_from_a_single_file() {
+        let dir = temp_dir("templates");
+
+        generate_config_files(&dir, "my_project", "18.0").unwrap();
+
+        for name in [
+            "compose.yml",
+            "odoo.conf",
+            "README.md",
+            "AGENTS.md",
+            "CLAUDE.md",
+            ".gitignore",
+        ] {
+            assert!(dir.join(name).exists(), "{name} must be generated");
+        }
+
+        let claude = fs::read_to_string(dir.join("CLAUDE.md")).unwrap();
+        assert!(
+            claude.contains("@AGENTS.md"),
+            "CLAUDE.md must import the briefing instead of duplicating it"
+        );
+
+        let agents = fs::read_to_string(dir.join("AGENTS.md")).unwrap();
+        assert!(agents.contains("my_project") && agents.contains("18.0"));
+        assert!(
+            agents.contains("rg \"_compute_display_name\" custom_addons/"),
+            "agents need the search guidance for this project's own code"
+        );
+        assert!(
+            agents.contains("odx store path") && agents.contains("additionalDirectories"),
+            "agents need to know Odoo core is outside the project, and how to reach it"
+        );
+
+        // `generate_from_template` replaces `{{var}}`; anything left over means a
+        // template used the wrong number of braces and ships a literal placeholder.
+        for name in ["README.md", "AGENTS.md", "CLAUDE.md"] {
+            let rendered = fs::read_to_string(dir.join(name)).unwrap();
+            assert!(
+                !rendered.contains("{{") && !rendered.contains("{my_project}"),
+                "{name} still contains an unrendered placeholder"
+            );
+        }
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn new_project_gets_an_attach_config() {
+        let dir = temp_dir("launch");
+
+        generate_debug_config(&dir).unwrap();
+
+        let launch = fs::read_to_string(dir.join(".vscode/launch.json")).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&launch).unwrap();
+        assert_eq!(parsed["configurations"][0]["request"], "attach");
+        assert_eq!(
+            parsed["configurations"][0]["connect"]["port"],
+            debug::DEFAULT_PORT
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn existing_launch_config_is_never_overwritten() {
+        let dir = temp_dir("keep");
+        fs::create_dir_all(dir.join(".vscode")).unwrap();
+        fs::write(dir.join(".vscode/launch.json"), "{ \"mine\": true }").unwrap();
+
+        generate_debug_config(&dir).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(dir.join(".vscode/launch.json")).unwrap(),
+            "{ \"mine\": true }"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
 }

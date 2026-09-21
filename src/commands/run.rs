@@ -1,21 +1,30 @@
+use crate::debug;
 use crate::tui::{self, LogLevel, OdooLogLine};
 use crate::ui::Ui;
 use crate::utils::{
     detect_odoo_version, ensure_odoo_conf_local, ensure_venv, find_project_root,
     find_python_command, require_odoo_bin, StreamSource,
 };
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-/// `--dev=all` includes `pdb`, which drops into an interactive post-mortem debugger on
-/// an unhandled exception. That needs a real stdin, which the dashboard path can't give
-/// it (the terminal belongs to the TUI), so the dashboard runs the same dev features
-/// minus the debugger. Use `odx run --plain` when you want the pdb prompt.
-const DEV_FLAG_PLAIN: &str = "--dev=all";
-const DEV_FLAG_DASHBOARD: &str = "--dev=reload,qweb,werkzeug,xml";
+/// How long to wait for the debug port to come free before a (re)start. debugpy's
+/// adapter releases it a moment after the previous Odoo process is gone.
+const DEBUG_PORT_GRACE: Duration = Duration::from_secs(3);
 
-pub fn execute(ui: &Ui, plain: bool) -> Result<(), String> {
+/// Odoo's developer features. `all` means `reload,qweb,xml` on 17.0/18.0 and
+/// `access,qweb,reload,xml` on 19.0 — none of which need an interactive stdin, so the
+/// dashboard and the plain path can run exactly the same thing. Debugging is not part
+/// of this flag on any supported version: it goes over DAP (see `crate::debug`).
+const DEV_FLAG: &str = "--dev=all";
+
+pub fn execute(
+    ui: &Ui,
+    plain: bool,
+    debug_port: Option<u16>,
+    debug_wait: bool,
+) -> Result<(), String> {
     ensure_venv()?;
 
     let project_root = find_project_root()?;
@@ -39,6 +48,15 @@ pub fn execute(ui: &Ui, plain: bool) -> Result<(), String> {
         .join(format!("run-{}", timestamp))
         .join("run.log");
 
+    let (debug_setup, shim_dir) = debug::prepare(&project_root, debug_port, debug_wait)?;
+    if !debug::is_available(&python) {
+        ui.warn(format!(
+            "debugpy is not installed in .venv; starting without a debugger (run 'odx install'). Expected listener: {}",
+            debug_setup.address()
+        ));
+    }
+    let debug_env = debug_setup.env(&shim_dir, &odoo_bin);
+
     let use_tui = !plain && ui.config().progress && !ui.config().json && ui.is_stdout_tty();
 
     if use_tui {
@@ -49,6 +67,8 @@ pub fn execute(ui: &Ui, plain: bool) -> Result<(), String> {
             &config_str,
             &project_root,
             session_log,
+            &debug_setup,
+            &debug_env,
         );
     }
 
@@ -58,27 +78,36 @@ pub fn execute(ui: &Ui, plain: bool) -> Result<(), String> {
         config_str.as_str(),
         "--addons-path",
         addons_path.as_str(),
-        DEV_FLAG_PLAIN,
+        DEV_FLAG,
     ];
-    run_plain(ui, &python, &args, &project_root, session_log)
+    debug::wait_for_port_free(debug_setup.port, DEBUG_PORT_GRACE);
+    run_plain(ui, &python, &args, &project_root, session_log, &debug_env)
 }
 
-fn title(project_root: &std::path::Path) -> String {
+fn title(project_root: &Path, debug: &debug::DebugSetup) -> String {
     let name = project_root
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("odx run");
     let version = detect_odoo_version(project_root).unwrap_or_else(|_| "unknown".to_string());
-    format!("odx run — {} (Odoo {})", name, version)
+    format!(
+        "odx run — {} (Odoo {}) · dap {}",
+        name,
+        version,
+        debug.address()
+    )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_with_dashboard(
     ui: &Ui,
     python: &str,
     odoo_bin: &str,
     config_file: &str,
-    project_root: &std::path::Path,
+    project_root: &Path,
     session_log: PathBuf,
+    debug_setup: &debug::DebugSetup,
+    debug_env: &[(String, String)],
 ) -> Result<(), String> {
     // Called for the first start and again for every restart the user asks for with
     // 'r', so the addons path is rebuilt each time: a module added to custom_addons
@@ -91,22 +120,27 @@ fn run_with_dashboard(
             config_file,
             "--addons-path",
             addons_path.as_str(),
-            DEV_FLAG_DASHBOARD,
+            DEV_FLAG,
         ];
-        spawn_odoo(python, &args, project_root)
+        // The previous process's debug adapter may still hold the port for a moment;
+        // the shim only gets one window to bind it.
+        debug::wait_for_port_free(debug_setup.port, DEBUG_PORT_GRACE);
+        spawn_odoo(python, &args, project_root, debug_env)
     };
 
-    tui::run(spawn, session_log, title(project_root), ui)
+    tui::run(spawn, session_log, title(project_root, debug_setup), ui)
 }
 
 fn spawn_odoo(
     python: &str,
     args: &[&str],
-    project_root: &std::path::Path,
+    project_root: &Path,
+    envs: &[(String, String)],
 ) -> Result<Child, String> {
     let mut cmd = Command::new(python);
     cmd.args(args)
         .current_dir(project_root)
+        .envs(envs.iter().map(|(k, v)| (k.as_str(), v.as_str())))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -128,19 +162,25 @@ fn run_plain(
     ui: &Ui,
     python: &str,
     args: &[&str],
-    project_root: &std::path::Path,
+    project_root: &Path,
     session_log: PathBuf,
+    debug_env: &[(String, String)],
 ) -> Result<(), String> {
     let json = ui.config().json;
     // `--quiet` still surfaces problems: only ERROR/CRITICAL lines make it to stderr.
     let quiet = ui.config().quiet;
     let use_color = ui.use_color();
 
+    let envs: Vec<(&str, &str)> = debug_env
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+
     let code = crate::utils::execute_command_streaming_status(
         python,
         args,
         Some(project_root),
-        &[],
+        &envs,
         |src, line| {
             let parsed = OdooLogLine::parse(line);
             let to_stderr = matches!(src, StreamSource::Stderr);

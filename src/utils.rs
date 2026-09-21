@@ -1,3 +1,4 @@
+use crate::odoo_source;
 use regex::Regex;
 use std::collections::HashMap;
 use std::fs;
@@ -60,14 +61,17 @@ fn find_project_root_from(start: &Path) -> Result<PathBuf, String> {
     }
 }
 
+/// Path to the `odoo-bin` this project runs. The source itself lives in the shared
+/// store (see [`crate::odoo_source`]), not inside the project.
 pub fn require_odoo_bin(project_root: &Path) -> Result<PathBuf, String> {
-    let odoo_bin = project_root.join("src/odoo/odoo-bin");
+    let source = odoo_source::resolve(project_root)?;
+    let odoo_bin = source.odoo_bin();
     if odoo_bin.exists() {
         Ok(odoo_bin)
     } else {
         Err(format!(
-            "Odoo source missing at {}. Run 'odx install' to initialize submodules.",
-            odoo_bin.display()
+            "Odoo source incomplete at {} (no odoo-bin). Run 'odx install' to fetch it.",
+            source.path.display()
         ))
     }
 }
@@ -624,13 +628,13 @@ pub fn check_python_version(min_version: &str) -> Result<(String, String), Strin
 
 /// Create project directory structure
 pub fn create_project_structure(root: &Path) -> Result<(), String> {
+    // No `src/`: Odoo's source lives in the shared store, not in the project.
     let dirs = vec![
         "custom_addons",
         "docs",
         "external_addons",
         "scripts",
         ".testing",
-        "src",
     ];
 
     for dir in dirs {
@@ -926,7 +930,8 @@ pub fn project_addon_modules(project_root: &Path) -> Result<Vec<(String, PathBuf
 }
 
 /// Build addons_path: only directories that exist (Odoo rejects non-existent paths).
-/// Includes custom_addons (and subdirs with modules), external_addons (and subdirs), and src/odoo/addons.
+/// Includes custom_addons (and subdirs with modules), external_addons (and subdirs),
+/// and the `addons` directory of the resolved Odoo source (shared store by default).
 pub fn build_addons_path(project_root: &Path) -> Result<String, String> {
     let external_dirs = external_addons_dirs_with_manifest(project_root)?;
 
@@ -953,13 +958,21 @@ pub fn build_addons_path(project_root: &Path) -> Result<String, String> {
         parts.push(abs.to_string_lossy().into_owned());
     }
 
-    let odoo_addons = root.join("src/odoo/addons");
-    if odoo_addons.exists() {
-        parts.push(odoo_addons.to_string_lossy().into_owned());
+    // Odoo core's addons come from wherever the source was resolved to. A project
+    // without a resolvable source can still build an addons path for its own modules;
+    // a missing store is reported by `require_odoo_bin`, not here.
+    if let Ok(source) = odoo_source::resolve(project_root) {
+        let odoo_addons = source.addons_dir();
+        if odoo_addons.exists() {
+            let abs = odoo_addons
+                .canonicalize()
+                .map_err(|e| format!("Failed to canonicalize {:?}: {}", odoo_addons, e))?;
+            parts.push(abs.to_string_lossy().into_owned());
+        }
     }
 
     if parts.is_empty() {
-        return Err("No valid addons directories found (custom_addons, external_addons subdirs, or src/odoo/addons)".to_string());
+        return Err("No valid addons directories found (custom_addons, external_addons subdirs, or the Odoo source addons directory)".to_string());
     }
 
     Ok(parts.join(","))
@@ -1017,41 +1030,15 @@ pub fn ensure_odoo_conf_local(project_root: &Path) -> Result<String, String> {
     Ok(addons_path)
 }
 
-/// Detect Odoo version from project `src/odoo` (release.py or __init__.py).
+/// Detect the Odoo version this project runs: read it from the resolved source when
+/// available, otherwise fall back to what the project pinned in `.odx.toml`.
 pub fn detect_odoo_version(project_root: &Path) -> Result<String, String> {
-    let release_py = project_root.join("src/odoo/odoo/release.py");
-    if release_py.exists() {
-        let content = fs::read_to_string(&release_py)
-            .map_err(|e| format!("Failed to read Odoo release.py: {}", e))?;
-
-        let re = Regex::new(r"version_info\s*=\s*\((\d+),\s*(\d+)").unwrap();
-        if let Some(caps) = re.captures(&content) {
-            return Ok(format!("{}.{}", &caps[1], &caps[2]));
-        }
-
-        let re2 = Regex::new(r#"version\s*=\s*['"](\d+)\.(\d+)"#).unwrap();
-        if let Some(caps) = re2.captures(&content) {
-            return Ok(format!("{}.{}", &caps[1], &caps[2]));
+    if let Ok(source) = odoo_source::resolve(project_root) {
+        if let Some(version) = odoo_source::version_from_checkout(&source.path) {
+            return Ok(version);
         }
     }
-
-    let odoo_init = project_root.join("src/odoo/odoo/__init__.py");
-    if odoo_init.exists() {
-        let content = fs::read_to_string(&odoo_init)
-            .map_err(|e| format!("Failed to read Odoo __init__.py: {}", e))?;
-
-        let re = Regex::new(r"version_info\s*=\s*\((\d+),\s*(\d+)\)").unwrap();
-        if let Some(caps) = re.captures(&content) {
-            return Ok(format!("{}.{}", &caps[1], &caps[2]));
-        }
-
-        let re2 = Regex::new(r#"__version__\s*=\s*['"](\d+)\.(\d+)"#).unwrap();
-        if let Some(caps) = re2.captures(&content) {
-            return Ok(format!("{}.{}", &caps[1], &caps[2]));
-        }
-    }
-
-    Err("Could not detect Odoo version from release.py or __init__.py".to_string())
+    odoo_source::project_version(project_root)
 }
 
 #[cfg(test)]
@@ -1154,7 +1141,8 @@ mod tests {
         fs::create_dir_all(&tmp).unwrap();
 
         let err = require_odoo_bin(&tmp).unwrap_err();
-        assert!(err.contains("odx install"));
+        assert!(err.contains("odx install"), "err was: {err}");
+        assert!(err.contains(".odx.toml"), "err was: {err}");
 
         let _ = fs::remove_dir_all(&tmp);
     }

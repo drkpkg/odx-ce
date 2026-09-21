@@ -1,9 +1,11 @@
+use crate::debug;
 use crate::install_guide::{build_install_guide, Requirement};
+use crate::odoo_source;
 use crate::os_context::{LinuxFamily, OsContext, PackageManager, Platform};
 use crate::ui::Ui;
 use crate::utils::{
-    check_command_exists, check_python_version, check_system_package, detect_odoo_version,
-    detect_os, find_docker_compose_command, find_project_root, get_command_version,
+    check_command_exists, check_python_version, check_system_package, detect_os,
+    find_docker_compose_command, find_project_root, find_python_command, get_command_version,
     require_odoo_bin,
 };
 use std::fs;
@@ -56,6 +58,11 @@ pub fn execute(ui: &Ui) -> Result<(), String> {
         ui.heading("Project Python Dependencies:");
         ui.info("---------------------------");
         check_python_dependencies(ui, &project_root)?;
+        ui.info("");
+
+        ui.heading("Debugger (DAP):");
+        ui.info("---------------");
+        all_ok &= check_debugger(ui);
         ui.info("");
 
         ui.heading("Odoo in project:");
@@ -239,8 +246,49 @@ fn check_macos_dependencies(ui: &Ui) -> Result<bool, String> {
     Ok(true)
 }
 
+/// odx always starts Odoo with a debugpy listener, so a missing debugpy is a real
+/// finding rather than an optional extra.
+fn check_debugger(ui: &Ui) -> bool {
+    let python = match find_python_command() {
+        Ok(p) => p,
+        Err(e) => {
+            ui.check(false, "debugpy", Some(&e));
+            return false;
+        }
+    };
+
+    if debug::is_available(&python) {
+        let version = Command::new(&python)
+            .args(["-c", "import debugpy; print(debugpy.__version__)"])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_default();
+        let detail = if version.is_empty() {
+            "installed".to_string()
+        } else {
+            format!(
+                "{} (attach on {}:{})",
+                version,
+                debug::HOST,
+                debug::DEFAULT_PORT
+            )
+        };
+        ui.check(true, "debugpy", Some(&detail));
+        true
+    } else {
+        ui.check(false, "debugpy", Some("not installed - run 'odx install'"));
+        false
+    }
+}
+
 fn check_python_dependencies(ui: &Ui, project_root: &Path) -> Result<(), String> {
-    let requirements_file = project_root.join("src/odoo/requirements.txt");
+    let Ok(source) = odoo_source::resolve(project_root) else {
+        ui.warn("Odoo source not available yet, skipping requirements check (run 'odx install')");
+        return Ok(());
+    };
+    let requirements_file = source.requirements();
 
     if !requirements_file.exists() {
         ui.warn("requirements.txt not found (project may not be initialized)");
@@ -353,24 +401,58 @@ fn check_project_compose(ui: &Ui, project_root: &Path) -> Result<(), String> {
 }
 
 fn check_odoo_in_project(ui: &Ui, project_root: &Path) -> Result<(), String> {
-    let odoo_path = project_root.join("src/odoo");
-    if !odoo_path.exists() {
-        ui.warn("src/odoo not found (run 'odx install' to initialize submodules)");
+    ui.info(format!("Store: {}", odoo_source::store_root().display()));
+
+    let source = match odoo_source::resolve(project_root) {
+        Ok(source) => source,
+        Err(e) => {
+            ui.check(false, "Odoo source", Some(&e));
+            return Ok(());
+        }
+    };
+
+    ui.check(
+        true,
+        "Odoo source",
+        Some(&format!(
+            "{} ({}) — {}",
+            source.path.display(),
+            source.origin.label(),
+            source.version
+        )),
+    );
+
+    if source.origin == odoo_source::Origin::InProject {
+        ui.warn(
+            "This project keeps its own Odoo checkout in src/odoo. Newer projects share one \
+             per version (see 'odx store ls'); delete src/odoo and add the version to .odx.toml \
+             to reclaim the space.",
+        );
+    }
+
+    if let Err(e) = require_odoo_bin(project_root) {
+        ui.warn(e);
         return Ok(());
     }
 
-    match require_odoo_bin(project_root) {
-        Ok(_) => {}
-        Err(e) => {
-            ui.warn(e);
-            return Ok(());
-        }
+    // Agents cannot read outside the project unless the directory is declared, and the
+    // source now lives outside it.
+    if source.origin == odoo_source::Origin::Store {
+        let declared = project_root.join(".claude/settings.json");
+        let granted = fs::read_to_string(&declared)
+            .map(|c| c.contains(source.path.to_string_lossy().as_ref()))
+            .unwrap_or(false);
+        ui.check(
+            granted,
+            "agent access to Odoo source",
+            Some(if granted {
+                "declared in .claude/settings.json"
+            } else {
+                "not declared - agents cannot read Odoo core; add it to .claude/settings.json permissions.additionalDirectories"
+            }),
+        );
     }
 
-    match detect_odoo_version(project_root) {
-        Ok(version) => ui.info(format!("Odoo version: {}", version)),
-        Err(e) => ui.warn(e),
-    }
     Ok(())
 }
 

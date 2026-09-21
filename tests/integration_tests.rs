@@ -10,6 +10,43 @@ use std::process::Command;
 const TEST_VERSIONS: [&str; 3] = ["17.0", "18.0", "19.0"];
 const TEST_DIR: &str = ".testing";
 const ZIP_DIR: &str = ".testing/odoo-zips";
+/// Odoo now lives in a shared store instead of inside each project. The tests point
+/// `ODX_ODOO_STORE` here so they never touch (or fill up) a developer's real store.
+const TEST_STORE: &str = ".testing/store";
+
+fn test_store_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(TEST_STORE)
+}
+
+/// Every `odx` invocation in these tests must use the test store.
+fn odx(bin: &Path) -> Command {
+    let mut cmd = Command::new(bin);
+    cmd.env("ODX_ODOO_STORE", test_store_path());
+    cmd
+}
+
+/// Put a minimal checkout in the test store, for tests that need a resolvable Odoo
+/// without paying for a real clone.
+fn seed_test_store(version: &str) -> PathBuf {
+    let checkout = test_store_path().join(version);
+    fs::create_dir_all(checkout.join("odoo")).expect("Failed to create store checkout");
+    fs::create_dir_all(checkout.join("addons")).expect("Failed to create store addons");
+    fs::write(checkout.join("odoo-bin"), "#!/bin/sh\n").expect("Failed to write odoo-bin");
+    let (major, minor) = version
+        .split_once('.')
+        .expect("version should be <major>.<minor>");
+    fs::write(
+        checkout.join("odoo/release.py"),
+        format!("version_info = ({major}, {minor}, 0, 'final', 0, '')\n"),
+    )
+    .expect("Failed to write release.py");
+    fs::write(
+        checkout.join("requirements.txt"),
+        "# Minimal requirements for testing\n",
+    )
+    .expect("Failed to write requirements.txt");
+    checkout
+}
 
 fn ensure_odoo_zip_downloaded(version: &str) {
     let zip_path = Path::new(ZIP_DIR).join(format!("odoo-{}.zip", version));
@@ -110,7 +147,7 @@ fn get_odoo_binary() -> PathBuf {
 fn test_doctor_command() {
     let odoo_bin = get_odoo_binary();
 
-    let output = Command::new(&odoo_bin).arg("doctor").output();
+    let output = odx(&odoo_bin).arg("doctor").output();
 
     let bin = odoo_bin.display().to_string();
     let output =
@@ -137,7 +174,7 @@ fn test_doctor_command() {
 fn test_doctor_json_mode_succeeds() {
     let odoo_bin = get_odoo_binary();
 
-    let output = Command::new(&odoo_bin)
+    let output = odx(&odoo_bin)
         .arg("--json")
         .arg("doctor")
         .output()
@@ -180,7 +217,7 @@ fn test_new_project(version: &str, project_name: &str) {
     fs::create_dir_all(TEST_DIR).expect("Failed to create test directory");
 
     // Change to test directory for project creation
-    let output = Command::new(&odoo_bin)
+    let output = odx(&odoo_bin)
         .arg("new")
         .arg(project_name)
         .arg("-v")
@@ -200,11 +237,28 @@ fn test_new_project(version: &str, project_name: &str) {
         );
     }
 
-    // Verify project structure
+    // Verify project structure. The Odoo source is deliberately NOT here: it belongs
+    // to the shared store, which is what keeps a project from costing 1.2 GB.
     assert!(test_path.exists(), "Project directory should exist");
     assert!(
-        test_path.join("src/odoo").exists(),
-        "Odoo source should exist"
+        !test_path.join("src/odoo").exists(),
+        "Odoo source must not be copied into the project"
+    );
+    assert!(
+        test_path.join(".odx.toml").exists(),
+        ".odx.toml should record the Odoo version"
+    );
+    let odx_toml =
+        fs::read_to_string(test_path.join(".odx.toml")).expect("Failed to read .odx.toml");
+    assert!(
+        odx_toml.contains(version),
+        ".odx.toml should pin {version}, got: {odx_toml}"
+    );
+    let store_checkout = test_store_path().join(version);
+    assert!(
+        store_checkout.join("odoo-bin").exists(),
+        "Odoo {version} should have been fetched into the store at {}",
+        store_checkout.display()
     );
     assert!(
         test_path.join("custom_addons").exists(),
@@ -230,9 +284,24 @@ fn test_new_project(version: &str, project_name: &str) {
         test_path.join("AGENTS.md").exists(),
         "AGENTS.md should exist"
     );
+    assert!(
+        test_path.join("CLAUDE.md").exists(),
+        "CLAUDE.md should exist"
+    );
+    let claude_settings = test_path.join(".claude/settings.json");
+    assert!(
+        claude_settings.exists(),
+        ".claude/settings.json should grant agents access to the store"
+    );
+    let granted =
+        fs::read_to_string(&claude_settings).expect("Failed to read .claude/settings.json");
+    assert!(
+        granted.contains(store_checkout.to_string_lossy().as_ref()),
+        "agents must be granted the store path, got: {granted}"
+    );
 
-    // Verify Odoo version
-    let odoo_init = test_path.join("src/odoo/odoo/__init__.py");
+    // Verify Odoo version, from the store checkout the project points at
+    let odoo_init = store_checkout.join("odoo/__init__.py");
     if odoo_init.exists() {
         let content = fs::read_to_string(&odoo_init).expect("Failed to read __init__.py");
         // Check if version is mentioned (exact match may vary)
@@ -243,7 +312,7 @@ fn test_new_project(version: &str, project_name: &str) {
     }
 
     // Test doctor command in the project
-    let doctor_output = Command::new(&odoo_bin)
+    let doctor_output = odx(&odoo_bin)
         .arg("doctor")
         .current_dir(&test_path)
         .output()
@@ -261,9 +330,10 @@ fn test_new_project(version: &str, project_name: &str) {
     );
 }
 
+/// The pre-store layout (a checkout inside the project) must keep working: existing
+/// projects are not migrated by an odx upgrade.
 #[test]
-fn test_doctor_in_project() {
-    // This test assumes a project exists, so we create one first
+fn test_doctor_in_legacy_project() {
     let project_name = "test_doctor_project";
     let test_path = Path::new(TEST_DIR).join(project_name);
 
@@ -295,7 +365,7 @@ fn test_doctor_in_project() {
     }
 
     let odoo_bin = get_odoo_binary();
-    let output = Command::new(&odoo_bin)
+    let output = odx(&odoo_bin)
         .arg("doctor")
         .current_dir(&test_path)
         .output();
@@ -329,7 +399,7 @@ fn test_doctor_shows_odoo_in_existing_projects() {
         }
 
         let odoo_bin = get_odoo_binary();
-        let output = Command::new(&odoo_bin)
+        let output = odx(&odoo_bin)
             .arg("doctor")
             .current_dir(&test_path)
             .output();
@@ -349,29 +419,74 @@ fn test_doctor_shows_odoo_in_existing_projects() {
     }
 }
 
+/// A project in the store layout: only a version pin, no Odoo source of its own.
+#[test]
+fn test_doctor_with_store_layout() {
+    let project_name = "test_store_project";
+    let test_path = Path::new(TEST_DIR).join(project_name);
+    let checkout = seed_test_store("18.0");
+
+    fs::create_dir_all(&test_path).expect("Failed to create test project");
+    fs::write(
+        test_path.join("compose.yml"),
+        "services:\n  postgres:\n    image: postgres:17\n",
+    )
+    .expect("Failed to write compose.yml");
+    fs::write(test_path.join(".odx.toml"), "[odoo]\nversion = \"18.0\"\n")
+        .expect("Failed to write .odx.toml");
+
+    let odoo_bin = get_odoo_binary();
+    let output = odx(&odoo_bin)
+        .arg("doctor")
+        .current_dir(&test_path)
+        .output()
+        .expect("Failed to execute doctor");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains(checkout.to_string_lossy().as_ref()),
+        "doctor should resolve Odoo to the shared store. Output: {stdout}"
+    );
+    assert!(
+        !test_path.join("src/odoo").exists(),
+        "no Odoo source should be created inside the project"
+    );
+
+    // `odx store path` must answer with the same checkout from inside the project.
+    let store_path = odx(&odoo_bin)
+        .arg("store")
+        .arg("path")
+        .current_dir(&test_path)
+        .output()
+        .expect("Failed to execute store path");
+    assert_eq!(
+        String::from_utf8_lossy(&store_path.stdout).trim(),
+        checkout.to_string_lossy().trim(),
+        "store path should resolve from inside a project"
+    );
+}
+
 #[test]
 fn test_install_command() {
-    // Create a minimal project for testing install
+    // A project in the store layout: the source it needs is in the store, not here.
     let project_name = "test_install_project";
     let test_path = Path::new(TEST_DIR).join(project_name);
+    seed_test_store("18.0");
 
-    if !test_path.exists() {
-        // Create minimal structure
-        fs::create_dir_all(test_path.join("src/odoo")).expect("Failed to create dirs");
-
-        // Create a minimal requirements.txt
-        fs::write(
-            test_path.join("src/odoo/requirements.txt"),
-            "# Minimal requirements for testing\n",
-        )
-        .expect("Failed to write requirements.txt");
-    }
+    fs::create_dir_all(&test_path).expect("Failed to create dirs");
+    fs::write(
+        test_path.join("compose.yml"),
+        "services:\n  postgres:\n    image: postgres:17\n",
+    )
+    .expect("Failed to write compose.yml");
+    fs::write(test_path.join(".odx.toml"), "[odoo]\nversion = \"18.0\"\n")
+        .expect("Failed to write .odx.toml");
 
     let odoo_bin = get_odoo_binary();
 
     // Note: This test may fail if venv doesn't exist, which is expected
     // We just verify the command doesn't crash
-    let output = Command::new(&odoo_bin)
+    let output = odx(&odoo_bin)
         .arg("install")
         .current_dir(&test_path)
         .output();
@@ -402,7 +517,7 @@ fn test_commands_exist() {
     let odoo_bin = get_odoo_binary();
 
     // Test that help works (verifies binary is functional)
-    let output = Command::new(&odoo_bin).arg("--help").output();
+    let output = odx(&odoo_bin).arg("--help").output();
 
     let bin = odoo_bin.display().to_string();
     let output = output.unwrap_or_else(|_| panic!("Failed to execute --help. Binary: {bin}"));
@@ -442,7 +557,7 @@ fn test_commands_exist() {
     );
 
     // Verify db subcommands include drop
-    let db_help = Command::new(&odoo_bin)
+    let db_help = odx(&odoo_bin)
         .arg("db")
         .arg("--help")
         .output()
@@ -455,7 +570,7 @@ fn test_commands_exist() {
         db_stdout
     );
 
-    let i18n_help = Command::new(&odoo_bin)
+    let i18n_help = odx(&odoo_bin)
         .arg("i18n")
         .arg("--help")
         .output()
@@ -497,7 +612,7 @@ fn test_sync_command_executes_after_new() {
 
     fs::create_dir_all(TEST_DIR).expect("Failed to create test directory");
 
-    let new_output = Command::new(&odoo_bin)
+    let new_output = odx(&odoo_bin)
         .arg("new")
         .arg(&project_name)
         .arg("-v")
@@ -520,10 +635,7 @@ fn test_sync_command_executes_after_new() {
         "Project directory should exist for sync test"
     );
 
-    let sync_output = Command::new(&odoo_bin)
-        .arg("sync")
-        .current_dir(&test_path)
-        .output();
+    let sync_output = odx(&odoo_bin).arg("sync").current_dir(&test_path).output();
 
     match sync_output {
         Ok(output) => {

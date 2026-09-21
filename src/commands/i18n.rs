@@ -1,10 +1,11 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::debug;
 use crate::ui::Ui;
 use crate::utils::{
-    ensure_odoo_conf_local, ensure_venv, execute_command, find_project_root, find_python_command,
-    project_addon_modules, require_odoo_bin, validate_db_name,
+    ensure_odoo_conf_local, ensure_venv, execute_command_with_env, find_project_root,
+    find_python_command, project_addon_modules, require_odoo_bin, validate_db_name,
 };
 
 const TEMPLATE_LANG: &str = "en_US";
@@ -24,6 +25,15 @@ pub fn execute(
 
     let python = find_python_command()?;
     let odoo_bin = require_odoo_bin(&project_root)?;
+
+    // Every Odoo process odx launches is debuggable, this one included: upgrade hooks
+    // and migration scripts are exactly the code you want a breakpoint in.
+    let (debug_setup, shim_dir) = debug::prepare(&project_root, None, false)?;
+    let debug_env = debug_setup.env(&shim_dir, &odoo_bin);
+    let envs: Vec<(&str, &str)> = debug_env
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
 
     let targets = resolve_targets(&project_root, module)?;
 
@@ -68,7 +78,7 @@ pub fn execute(
             lang_for_odoo,
         ];
 
-        execute_command(&python, &args, Some(&project_root))?;
+        execute_command_with_env(&python, &args, Some(&project_root), &envs)?;
 
         ui.success(format!(
             "Exported translations to {}",
